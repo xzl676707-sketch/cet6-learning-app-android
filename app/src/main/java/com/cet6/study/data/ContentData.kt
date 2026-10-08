@@ -137,13 +137,13 @@ class ContentDb private constructor(context: Context) {
     fun getReadingSentences(paperId: String, readingType: String): List<ReadingSentence> {
         val actual = readingSource(paperId)
         val sql = """
-            SELECT u.unit_id,u.paragraph_no,u.order_no,u.text,COALESCE(d.translation_zh,''),COALESCE(d.structure_analysis_zh,'')
+            SELECT u.unit_id,u.passage_no,u.paragraph_no,u.order_no,u.text,COALESCE(d.translation_zh,''),COALESCE(d.structure_analysis_zh,'')
             FROM content_units u LEFT JOIN reading_details d ON d.unit_id=u.unit_id
             WHERE u.paper_id=? AND u.module='reading' AND u.content_type='text' AND u.reading_type=?
             ORDER BY COALESCE(u.passage_no,0),COALESCE(u.paragraph_no,0),COALESCE(u.order_no,0),u.unit_id
         """.trimIndent()
         return database.rawQuery(sql, arrayOf(actual, readingType)).use { c ->
-            buildList { while (c.moveToNext()) add(ReadingSentence(c.getInt(0), if (c.isNull(1)) null else c.getInt(1), c.getInt(2), c.getString(3), c.getString(4), c.getString(5))) }
+            buildList { while (c.moveToNext()) add(ReadingSentence(c.getInt(0), if (c.isNull(1)) null else c.getInt(1), if (c.isNull(2)) null else c.getInt(2), c.getInt(3), c.getString(4), c.getString(5), c.getString(6))) }
         }
     }
 
@@ -169,8 +169,8 @@ class ContentDb private constructor(context: Context) {
 
     fun getWriting(paperId: String): WritingItem? {
         val prompt = getUnits(paperId, "writing").firstOrNull() ?: return null
-        val samples = database.rawQuery("SELECT sample_type,text,highlights_json FROM writing_samples WHERE prompt_unit_id=? ORDER BY CASE sample_type WHEN 'reference' THEN 0 ELSE 1 END,sample_id", arrayOf(prompt.unitId.toString())).use { c ->
-            buildList { while(c.moveToNext()) add(WritingSample(c.getString(0),c.getString(1),c.getString(2) ?: "[]")) }
+        val samples = database.rawQuery("SELECT sample_id,sample_type,text,highlights_json FROM writing_samples WHERE prompt_unit_id=? ORDER BY CASE sample_type WHEN 'reference' THEN 0 ELSE 1 END,sample_id", arrayOf(prompt.unitId.toString())).use { c ->
+            buildList { while(c.moveToNext()) add(WritingSample(c.getLong(0),c.getString(1),c.getString(2),c.getString(3) ?: "[]")) }
         }
         return WritingItem(prompt.unitId, prompt.text, samples)
     }
@@ -193,11 +193,11 @@ data class WordDetail(val wordId: Int,val rank: Int,val lemma: String,val level:
 data class WordSense(val senseId: Int,val pos: String,val meaning: String,val priority: Int,val examples: List<WordExample> = emptyList())
 data class WordExample(val english: String,val chinese: String,val source: String)
 data class PaperCard(val paperId: String,val year: Int,val month: Int,val setNo: Int,val readingSourceId: String,val itemCount: Int) { val title get() = "${year}年${month}月 第${setNo}套" }
-data class ReadingSentence(val unitId: Int,val paragraphNo: Int?,val orderNo: Int,val text: String,val translation: String,val analysis: String)
+data class ReadingSentence(val unitId: Int,val passageNo: Int?,val paragraphNo: Int?,val orderNo: Int,val text: String,val translation: String,val analysis: String)
 data class ReadingQuestion(val unitId: Int,val questionNo: Int?,val text: String,val answer: String,val optionText: String,val explanation: String,val evidence: String)
 data class BasicUnit(val unitId: Int,val orderNo: Int,val text: String)
 data class TranslationItem(val unitId: Int,val orderNo: Int,val chinese: String,val reference: String,val optimized: String)
-data class WritingSample(val type: String,val text: String,val highlightsJson: String)
+data class WritingSample(val sampleId: Long,val type: String,val text: String,val highlightsJson: String)
 data class WritingItem(val promptUnitId: Int,val prompt: String,val samples: List<WritingSample>)
 
 @Entity(tableName = "user_word_status")
@@ -207,7 +207,17 @@ data class UserWordStatus(
     @androidx.room.ColumnInfo(name="next_review") val nextReview: Long,
     @androidx.room.ColumnInfo(name="last_reviewed") val lastReviewed: Long,
     @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int,
-    @androidx.room.ColumnInfo(name="review_stage") val reviewStage: Int = 0
+    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0
+)
+
+@Entity(tableName = "user_reading_status", indices = [Index(value = ["paper_id", "reading_type", "passage_no"])])
+data class UserReadingStatus(
+    @PrimaryKey @androidx.room.ColumnInfo(name = "unit_id") val unitId: Int,
+    @androidx.room.ColumnInfo(name = "paper_id") val paperId: String,
+    @androidx.room.ColumnInfo(name = "reading_type") val readingType: String,
+    @androidx.room.ColumnInfo(name = "passage_no") val passageNo: Int,
+    val familiarity: String,
+    @androidx.room.ColumnInfo(name = "studied_at") val studiedAt: Long = System.currentTimeMillis()
 )
 
 @Entity(
@@ -230,7 +240,13 @@ data class UserNote(
     @androidx.room.ColumnInfo(name="item_type") val itemType: String,
     @androidx.room.ColumnInfo(name="item_id") val itemId: Int,
     val content: String,
-    @androidx.room.ColumnInfo(name="updated_at") val updatedAt: Long = System.currentTimeMillis()
+    @androidx.room.ColumnInfo(name="updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    @androidx.room.ColumnInfo(name="source_text", defaultValue = "''") val sourceText: String = "",
+    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0,
+    @androidx.room.ColumnInfo(name="next_review", defaultValue = "0") val nextReview: Long = 0L,
+    @androidx.room.ColumnInfo(name="last_reviewed", defaultValue = "0") val lastReviewed: Long = 0L,
+    @androidx.room.ColumnInfo(name="review_count", defaultValue = "0") val reviewCount: Int = 0,
+    @androidx.room.ColumnInfo(defaultValue = "''") val familiarity: String = ""
 )
 
 @Dao
@@ -240,17 +256,21 @@ interface UserDao {
     @Query("SELECT word_id FROM user_word_status") suspend fun studiedWordIds(): List<Int>
     @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now") suspend fun dueCount(now: Long): Int
     @Query("SELECT COUNT(*) FROM user_word_status") suspend fun studiedCount(): Int
+    @Query("SELECT * FROM user_reading_status WHERE paper_id=:paperId AND reading_type=:readingType") suspend fun readingStatuses(paperId: String, readingType: String): List<UserReadingStatus>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveReadingStatus(status: UserReadingStatus)
+    @Query("SELECT * FROM user_notes WHERE next_review<=:now ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
+    @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now") suspend fun dueNoteCount(now: Long): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
     @Insert suspend fun insertReviewHistory(item: UserReviewHistory)
     @Transaction suspend fun recordReview(status: UserWordStatus, history: UserReviewHistory) {
         saveStatus(status)
         insertReviewHistory(history)
     }
-    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveNote(note: UserNote)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveNote(note: UserNote): Long
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class],version = 2,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class],version = 3,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -273,9 +293,32 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN source_text TEXT NOT NULL DEFAULT ''")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN review_stage INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN next_review INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN last_reviewed INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN familiarity TEXT NOT NULL DEFAULT ''")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_reading_status (
+                        unit_id INTEGER NOT NULL PRIMARY KEY,
+                        paper_id TEXT NOT NULL,
+                        reading_type TEXT NOT NULL,
+                        passage_no INTEGER NOT NULL,
+                        familiarity TEXT NOT NULL,
+                        studied_at INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_reading_status_paper_id_reading_type_passage_no ON user_reading_status(paper_id, reading_type, passage_no)")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
                 .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_2_3)
                 .build().also { instance=it }
         }
     }
