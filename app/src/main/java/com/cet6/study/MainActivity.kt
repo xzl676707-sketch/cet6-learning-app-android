@@ -36,12 +36,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val AppBg = Color(0xFFF4F8F3)
+private val AppBg = Color(0xFFECF7E1)
 private val CardBg = Color(0xFFFFFFFF)
-private val Green = Color(0xFF468A70)
-private val DarkGreen = Color(0xFF245A49)
-private val PaleGreen = Color(0xFFE3F0E8)
-private val PaleYellow = Color(0xFFFFF3D9)
+private val Green = Color(0xFF3F7658)
+private val DarkGreen = Color(0xFF294D38)
+private val PaleGreen = Color(0xFFD3E8B7)
+private val PaleBlue = Color(0xFFCDE7FA)
+private val PaleYellow = Color(0xFFFFF4B6)
 private val Ink = Color(0xFF24352E)
 private val Muted = Color(0xFF78877F)
 
@@ -63,6 +64,7 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
 }
 
 private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文") }
+private enum class WordListMode { NEW, REVIEW, ALL }
 private data class NoteTarget(val type: String, val id: Int, val title: String)
 
 @Composable
@@ -76,6 +78,7 @@ private fun Cet6StudyApp() {
     var selectedWordId by remember { mutableStateOf<Int?>(null) }
     var wordQueue by remember { mutableStateOf(emptyList<Int>()) }
     var ratedWordIds by remember { mutableStateOf(emptySet<Int>()) }
+    var wordListMode by remember { mutableStateOf(WordListMode.NEW) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
@@ -111,6 +114,7 @@ private fun Cet6StudyApp() {
                 noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null })
                 selectedWordId != null -> WordDetailScreen(
                     wordId = selectedWordId!!,
+                    progress = (wordQueue.indexOf(selectedWordId!!) + 1).coerceAtLeast(1) to wordQueue.size,
                     repo = repo,
                     dao = dao,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
@@ -129,8 +133,11 @@ private fun Cet6StudyApp() {
                 )
                 else -> when(page) {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due,
-                        onWords = { page = Page.WORDS }, onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
-                    Page.WORDS -> WordListScreen(repo, dao, onWord = { id, queue ->
+                        onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
+                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
+                        onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
+                        onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, onMode = { wordListMode = it }, onWord = { id, queue ->
                         wordQueue = queue
                         ratedWordIds = emptySet()
                         selectedWordId = id
@@ -145,7 +152,7 @@ private fun Cet6StudyApp() {
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -168,7 +175,10 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onW
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
                         StatPill("待复习",due.toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
-                    Button(onClick=onWords,colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFDDEDE2),contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("开始今天的学习  →",fontWeight=FontWeight.SemiBold) }
+                    Row(horizontalArrangement=Arrangement.spacedBy(9.dp)) {
+                        Button(onClick=onReview,enabled=due>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.16f),disabledContentColor=Color.White.copy(alpha=.65f)),shape=RoundedCornerShape(14.dp)) { Text("今日复习 $due",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onNewWords,colors=ButtonDefaults.buttonColors(containerColor=PaleYellow,contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
+                    }
                     Text("新词每天最多显示 10 个；例句未齐的词暂不进入背诵",color=Color.White.copy(alpha=.72f),fontSize=12.sp)
                 }
             }
@@ -208,31 +218,34 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int,List<Int>)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
-    var dailyOnly by remember { mutableStateOf(true) }
-    var dailyIds by remember { mutableStateOf(emptySet<Int>()) }
+    var dueIds by remember { mutableStateOf(emptyList<Int>()) }
+    var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
-    LaunchedEffect(Unit) {
-        dailyIds=withContext(Dispatchers.IO) {
-            val dueIds=dao.dueWordIds(System.currentTimeMillis())
+    LaunchedEffect(mode) {
+        withContext(Dispatchers.IO) {
+            dueIds=dao.dueWordIds(System.currentTimeMillis())
             val seen=dao.studiedWordIds().toSet()
-            (dueIds + repo.getNewWordIds(10,seen)).toSet()
+            newIds=repo.getNewWordIds(10,seen)
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("单词", "按最终背诵顺序浏览，例句不足的词会标出")
         OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
         Row(Modifier.padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected=dailyOnly,onClick={dailyOnly=true},label={Text("今日计划 ${dailyIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=!dailyOnly,onClick={dailyOnly=false},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.REVIEW,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
+            FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
         }
-        val visibleWords=if(dailyOnly && search.isBlank()) words.filter{it.wordId in dailyIds && it.exampleCount>=3} else words
+        val plannedIds=when(mode){WordListMode.NEW->newIds;WordListMode.REVIEW->dueIds;WordListMode.ALL->emptyList()}
+        val wordsById=words.associateBy { it.wordId }
+        val visibleWords=if(mode!=WordListMode.ALL) plannedIds.mapNotNull { wordsById[it] }.filter { it.exampleCount>=3 } else words
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            if(visibleWords.isEmpty()) item { Text(if(dailyOnly && search.isBlank()) "今天的计划已完成。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
+            if(visibleWords.isEmpty()) item { Text(if(mode!=WordListMode.ALL && search.isBlank()) if(mode==WordListMode.REVIEW) "当前没有到期复习的单词。" else "新词已学完。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
             items(visibleWords,key={it.wordId}) { word ->
-                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
                         Text(word.rank.toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
                         Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
@@ -245,10 +258,11 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int,List<Int>)->Un
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:()->Unit) {
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:()->Unit) {
     var detail by remember { mutableStateOf<WordDetail?>(null) }
     var currentStatus by remember { mutableStateOf<UserWordStatus?>(null) }
     var saving by remember { mutableStateOf(false) }
+    var revealed by remember(wordId) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     LaunchedEffect(wordId) { withContext(Dispatchers.IO) { detail=repo.getWord(wordId); currentStatus=dao.status(wordId) } }
     Column(Modifier.fillMaxSize()) {
@@ -257,13 +271,15 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
         if(w==null) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Green)} else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp),contentPadding=PaddingValues(bottom=28.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 item {
-                    Card(colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(20.dp)) {
+                    Text("${if(progress.second>0) "${progress.first} / ${progress.second} · " else ""}${if(currentStatus==null) "新词学习" else "今日复习"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=4.dp))
+                    Card(Modifier.fillMaxWidth().clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
                         Text("第 ${w.rank} 位 · ${w.level}",color=Color.White.copy(alpha=.75f),fontSize=12.sp)
-                        Text(w.lemma,color=Color.White,fontSize=30.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=5.dp))
-                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Color.White.copy(alpha=.78f),fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
+                        Text(w.lemma,color=Color.White,fontSize=34.sp,fontWeight=FontWeight.Bold)
+                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Color.White.copy(alpha=.78f),fontSize=13.sp)
+                        Text(if(revealed) "释义与例句" else "先想想它的意思 · 点卡片揭晓",color=Color.White.copy(alpha=.9f),fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
                     } }
                 }
-            items(w.senses,key={it.senseId}) { sense ->
+                if(revealed) items(w.senses,key={it.senseId}) { sense ->
                     Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
                             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){Text(sense.pos,color=Green,fontSize=12.sp,fontWeight=FontWeight.Bold);Text(sense.meaning,color=Ink,fontSize=17.sp,fontWeight=FontWeight.SemiBold)}
@@ -279,13 +295,13 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
                         }
                     }
                 }
-                item {
+                if(revealed) item {
                     if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
                     Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                         ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true},onRated) }
                         ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
                     }
                     currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
@@ -299,7 +315,12 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
     onStart()
     scope.launch(Dispatchers.IO) {
         val old=dao.status(wordId)
-        dao.saveStatus(UserWordStatus(wordId,value,nextReviewMillis(value),System.currentTimeMillis(),(old?.reviewCount ?: 0)+1))
+        val now=System.currentTimeMillis()
+        val schedule=scheduleNextReview(value,old?.reviewStage ?: 0,now)
+        dao.recordReview(
+            UserWordStatus(wordId,value,schedule.nextReviewMillis,now,(old?.reviewCount ?: 0)+1,schedule.stage),
+            UserReviewHistory(wordId=wordId,reviewedAt=now,familiarity=value,stageBefore=old?.reviewStage ?: 0,stageAfter=schedule.stage,intervalDays=schedule.intervalDays)
+        )
         withContext(Dispatchers.Main) { onComplete() }
     }
 }
@@ -372,7 +393,7 @@ private fun highlightedText(text:String,json:String):androidx.compose.ui.text.An
         ranges.forEach { (start,end) ->
             if(start<cursor) return@forEach
             append(text.substring(cursor,start))
-            pushStyle(androidx.compose.ui.text.SpanStyle(background=Color(0xFFFFE8A3),fontWeight=FontWeight.SemiBold))
+            pushStyle(androidx.compose.ui.text.SpanStyle(background=PaleYellow,fontWeight=FontWeight.SemiBold))
             append(text.substring(start,end))
             pop()
             cursor=end
