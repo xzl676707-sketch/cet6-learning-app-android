@@ -9,8 +9,12 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Index
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDate
@@ -202,7 +206,22 @@ data class UserWordStatus(
     val familiarity: String,
     @androidx.room.ColumnInfo(name="next_review") val nextReview: Long,
     @androidx.room.ColumnInfo(name="last_reviewed") val lastReviewed: Long,
-    @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int
+    @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int,
+    @androidx.room.ColumnInfo(name="review_stage") val reviewStage: Int = 0
+)
+
+@Entity(
+    tableName = "user_review_history",
+    indices = [Index(value = ["word_id", "reviewed_at"])]
+)
+data class UserReviewHistory(
+    @PrimaryKey(autoGenerate = true) @androidx.room.ColumnInfo(name = "review_id") val reviewId: Long = 0,
+    @androidx.room.ColumnInfo(name = "word_id") val wordId: Int,
+    @androidx.room.ColumnInfo(name = "reviewed_at") val reviewedAt: Long,
+    val familiarity: String,
+    @androidx.room.ColumnInfo(name = "stage_before") val stageBefore: Int,
+    @androidx.room.ColumnInfo(name = "stage_after") val stageAfter: Int,
+    @androidx.room.ColumnInfo(name = "interval_days") val intervalDays: Int
 )
 
 @Entity(tableName = "user_notes")
@@ -222,23 +241,57 @@ interface UserDao {
     @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now") suspend fun dueCount(now: Long): Int
     @Query("SELECT COUNT(*) FROM user_word_status") suspend fun studiedCount(): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
+    @Insert suspend fun insertReviewHistory(item: UserReviewHistory)
+    @Transaction suspend fun recordReview(status: UserWordStatus, history: UserReviewHistory) {
+        saveStatus(status)
+        insertReviewHistory(history)
+    }
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveNote(note: UserNote)
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class],version = 1,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class],version = 2,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
         @Volatile private var instance: UserDatabase? = null
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_word_status ADD COLUMN review_stage INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_review_history (
+                        review_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        word_id INTEGER NOT NULL,
+                        reviewed_at INTEGER NOT NULL,
+                        familiarity TEXT NOT NULL,
+                        stage_before INTEGER NOT NULL,
+                        stage_after INTEGER NOT NULL,
+                        interval_days INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_review_history_word_id_reviewed_at ON user_review_history(word_id, reviewed_at)")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db").build().also { instance=it }
+            instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
+                .addMigrations(MIGRATION_1_2)
+                .build().also { instance=it }
         }
     }
 }
 
-fun nextReviewMillis(familiarity: String): Long {
-    val days = when(familiarity) { "不会" -> 1L; "了解" -> 3L; else -> 7L }
-    return System.currentTimeMillis() + days * 24L * 60L * 60L * 1000L
+data class ReviewSchedule(val stage: Int, val intervalDays: Int, val nextReviewMillis: Long)
+
+fun scheduleNextReview(familiarity: String, currentStage: Int, reviewedAt: Long = System.currentTimeMillis()): ReviewSchedule {
+    val intervals = listOf(1, 3, 7, 15, 30, 60)
+    val safeStage = currentStage.coerceIn(0, intervals.lastIndex)
+    val nextStage = when (familiarity) {
+        "熟悉" -> (safeStage + 1).coerceAtMost(intervals.lastIndex)
+        "了解", "有点了解" -> (safeStage - 1).coerceAtLeast(0)
+        else -> 0
+    }
+    val days = intervals[nextStage]
+    return ReviewSchedule(nextStage, days, reviewedAt + days * 24L * 60L * 60L * 1000L)
 }
 fun todayStartMillis(): Long = LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
