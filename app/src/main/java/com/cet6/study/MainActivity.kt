@@ -316,10 +316,11 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
     scope.launch(Dispatchers.IO) {
         val old=dao.status(wordId)
         val now=System.currentTimeMillis()
-        val schedule=scheduleNextReview(value,old?.reviewStage ?: 0,now)
+        val stageBefore=old?.reviewStage ?: -1
+        val schedule=scheduleNextReview(value,stageBefore,now)
         dao.recordReview(
             UserWordStatus(wordId,value,schedule.nextReviewMillis,now,(old?.reviewCount ?: 0)+1,schedule.stage),
-            UserReviewHistory(wordId=wordId,reviewedAt=now,familiarity=value,stageBefore=old?.reviewStage ?: 0,stageAfter=schedule.stage,intervalDays=schedule.intervalDays)
+            UserReviewHistory(wordId=wordId,reviewedAt=now,familiarity=value,stageBefore=stageBefore,stageAfter=schedule.stage,intervalDays=schedule.intervalDays)
         )
         withContext(Dispatchers.Main) { onComplete() }
     }
