@@ -282,11 +282,11 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
                 item {
                     if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text("选择后自动进入下一个计划单词；下次复习时间按你的熟悉程度安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        ReviewButton("不会\n明天复习",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("有点了解\n3天后复习",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("熟悉\n7天后复习",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
                     }
                     currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                 }
