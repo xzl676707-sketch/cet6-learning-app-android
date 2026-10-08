@@ -10,6 +10,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -417,6 +419,11 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
         Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
         Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.padding(vertical=6.dp)) { listOf("逐句精读","整篇通读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
         if(mode!="题目答案") {
+            val completedPassages=passageNos.count { no ->
+                val rows=sentences.filter{it.passageNo==no}
+                rows.isNotEmpty() && rows.all{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+            }
+            Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=6.dp))
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.padding(bottom=8.dp)) {
                 passageNos.forEach { passageNo ->
                     val rows=sentences.filter{it.passageNo==passageNo}
@@ -430,7 +437,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 val status=statusByUnit[sentence.unitId]
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
                 Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                         SelectableNoteText(androidx.compose.ui.text.AnnotatedString(sentence.text),"reading",sentence.unitId,"阅读笔记",onNote)
                         if(revealed) {
@@ -546,7 +553,7 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
         if(item!=null) {
             Text("第 ${index+1} / ${rows.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
             Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(24.dp)) {
-                Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                Column(Modifier.fillMaxWidth().padding(22.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                     Text("先在心里翻译",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold)
                     Text(item.chinese,fontSize=19.sp,lineHeight=31.sp,color=DarkGreen,fontWeight=FontWeight.Medium)
                     if(revealed) {
