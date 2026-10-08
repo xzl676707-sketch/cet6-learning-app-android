@@ -411,7 +411,7 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
         ScreenHeading("翻译训练","先在心里作答，再对照参考译文和优化译文")
         PaperSelector(papers,selectedId,{selectedId=it})
         LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=22.dp),verticalArrangement=Arrangement.spacedBy(11.dp)) {
-            items(rows,key={it.unitId}){item-> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
+            items(rows,key={it.unitId}){item-> Card(colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(11.dp)){
                 Text("第 ${item.orderNo} 句",fontSize=11.sp,color=Green,fontWeight=FontWeight.Bold)
                 Text(item.chinese,fontSize=15.sp,lineHeight=22.sp,color=Ink)
                 if(item.reference.isBlank() && item.optimized.isBlank()) Text("参考译文正在补入",fontSize=12.sp,color=Muted)
