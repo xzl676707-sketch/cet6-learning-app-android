@@ -388,12 +388,13 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
     var selectedId by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("") }
     var readingTypes by remember { mutableStateOf(emptyList<String>()) }
-    var mode by remember { mutableStateOf("逐句精读") }
     var sentences by remember { mutableStateOf(emptyList<ReadingSentence>()) }
     var questions by remember { mutableStateOf(emptyList<ReadingQuestion>()) }
     var statuses by remember { mutableStateOf(emptyList<UserReadingStatus>()) }
     var selectedPassage by remember { mutableIntStateOf(1) }
     var sentenceIndex by remember { mutableIntStateOf(0) }
+    var readerMode by remember { mutableStateOf("逐句精读") }
+    var inReader by remember { mutableStateOf(false) }
     var revealed by remember(selectedId,selectedType,selectedPassage,sentenceIndex) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")}; if(papers.isNotEmpty()) selectedId=papers.first().paperId }
@@ -412,27 +413,47 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
     val passageSentences=sentences.filter{it.passageNo==selectedPassage}
     val sentence=passageSentences.getOrNull(sentenceIndex)
     val statusByUnit=statuses.associateBy{it.unitId}
-    Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("阅读精读", "逐句回忆和揭晓，也可以连续通读整篇")
-        PaperSelector(papers,selectedId,{selectedId=it})
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.padding(vertical=6.dp)) { listOf("逐句精读","整篇通读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
-        if(mode!="题目答案") {
-            val completedPassages=passageNos.count { no ->
-                val rows=sentences.filter{it.passageNo==no}
-                rows.isNotEmpty() && rows.all{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
-            }
-            Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=6.dp))
-            Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.padding(bottom=8.dp)) {
-                passageNos.forEach { passageNo ->
+    val completedPassages=passageNos.count { no ->
+        val rows=sentences.filter{it.passageNo==no}
+        rows.isNotEmpty() && rows.all{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+    }
+    if(!inReader) {
+        Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            ScreenHeading("阅读精读", "先选试卷和文章，再进入阅读")
+            PaperSelector(papers,selectedId,{selectedId=it})
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
+            Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
+            LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                items(passageNos) { passageNo ->
                     val rows=sentences.filter{it.passageNo==passageNo}
                     val done=rows.count{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
-                    FilterChip(selected=selectedPassage==passageNo,onClick={selectedPassage=passageNo;sentenceIndex=0},label={Text("第${passageNo}篇 $done/${rows.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=if(done==rows.size) PaleGreen else PaleBlue))
+                    Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(20.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
+                                Text("${typeLabel(selectedType)} · 第${passageNo}篇",fontWeight=FontWeight.Bold,fontSize=17.sp,color=DarkGreen)
+                                Text("$done / ${rows.size} 句",fontSize=12.sp,color=Muted)
+                            }
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                Button(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text("开始精读") }
+                                OutlinedButton(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="整篇通读";inReader=true},modifier=Modifier.weight(1f),shape=RoundedCornerShape(13.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green),contentPadding=PaddingValues(vertical=10.dp)) { Text("整篇阅读") }
+                            }
+                        }
+                    }
+                }
+                item {
+                    OutlinedButton(onClick={readerMode="题目答案";inReader=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) { Text("查看本套阅读题目与答案") }
                 }
             }
         }
-        when(mode) {
+    } else {
+        Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            Row(Modifier.fillMaxWidth().padding(top=4.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically) {
+                TextButton(onClick={inReader=false},contentPadding=PaddingValues(horizontal=4.dp,vertical=6.dp)) { Text("‹ 返回文章",color=Green,fontSize=14.sp) }
+                Spacer(Modifier.width(10.dp))
+                Text(if(readerMode=="题目答案") "阅读题目" else "${typeLabel(selectedType)} · 第${selectedPassage}篇",fontSize=16.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen,maxLines=1)
+            }
+            when(readerMode) {
             "逐句精读" -> if(sentence!=null) {
                 val status=statusByUnit[sentence.unitId]
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
@@ -455,8 +476,11 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                             ReviewButton(rating,Modifier.weight(1f),false) {
                                 scope.launch(Dispatchers.IO) {
                                     dao.saveReadingStatus(UserReadingStatus(sentence.unitId,selectedId,selectedType,sentence.passageNo ?: selectedPassage,rating))
-                                    statuses=dao.readingStatuses(selectedId,selectedType)
-                                    withContext(Dispatchers.Main) { if(sentenceIndex<passageSentences.lastIndex) sentenceIndex++ }
+                                    val updated=dao.readingStatuses(selectedId,selectedType)
+                                    withContext(Dispatchers.Main) {
+                                        statuses=updated
+                                        if(sentenceIndex<passageSentences.lastIndex) sentenceIndex++
+                                    }
                                 }
                             }
                         }
@@ -468,16 +492,19 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 }
             } else Text("这篇暂无可显示的句子。",color=Muted,modifier=Modifier.padding(20.dp))
             "整篇通读" -> if(passageSentences.isNotEmpty()) {
-                Text("整篇连续阅读 · ${passageSentences.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(vertical=8.dp))
+                val paragraphs=passageSentences.groupIntoReadableParagraphs()
+                Text("整篇阅读 · ${passageSentences.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
                 LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-                    item { Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(passageSentences.joinToString(" "){it.text}),"reading",passageSentences.first().unitId,"阅读篇章笔记",onNote)
+                    items(paragraphs) { paragraph -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                        paragraph.paragraphNo?.let { Text("第${it}段",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Green) }
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(paragraph.sentences.joinToString(" "){it.text}),"reading",paragraph.sentences.first().unitId,"阅读篇章笔记",onNote)
                     }} }
                 }
                 Button(onClick={
                     scope.launch(Dispatchers.IO) {
                         passageSentences.forEach { dao.saveReadingStatus(UserReadingStatus(it.unitId,selectedId,selectedType,it.passageNo ?: selectedPassage,"熟悉")) }
-                        statuses=dao.readingStatuses(selectedId,selectedType)
+                        val updated=dao.readingStatuses(selectedId,selectedType)
+                        withContext(Dispatchers.Main) { statuses=updated }
                     }
                 },modifier=Modifier.fillMaxWidth(),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(16.dp)){Text("标记本篇已精读")}
             }
@@ -495,8 +522,25 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 }
               } } }
             }
+            }
         }
     }
+}
+
+private data class ReadingParagraph(val paragraphNo:Int?,val sentences:List<ReadingSentence>)
+
+/** Use paragraph numbers from the source data where available. For records without them,
+ * keep each source sentence as its own spaced block instead of flattening the entire essay. */
+private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingParagraph> {
+    val groups=mutableListOf<ReadingParagraph>()
+    for(sentence in this) {
+        val number=sentence.paragraphNo
+        val previous=groups.lastOrNull()
+        if(number!=null && previous?.paragraphNo==number) {
+            groups[groups.lastIndex]=previous.copy(sentences=previous.sentences+sentence)
+        } else groups += ReadingParagraph(number,listOf(sentence))
+    }
+    return groups
 }
 
 @Composable
