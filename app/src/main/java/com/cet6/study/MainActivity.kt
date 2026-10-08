@@ -74,6 +74,8 @@ private fun Cet6StudyApp() {
     val scope = rememberCoroutineScope()
     var page by remember { mutableStateOf(Page.HOME) }
     var selectedWordId by remember { mutableStateOf<Int?>(null) }
+    var wordQueue by remember { mutableStateOf(emptyList<Int>()) }
+    var ratedWordIds by remember { mutableStateOf(emptySet<Int>()) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
@@ -112,12 +114,27 @@ private fun Cet6StudyApp() {
                     repo = repo,
                     dao = dao,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
-                    onRated = { selectedWordId = null; scope.launch { refreshCounts() } }
+                    onRated = {
+                        val currentId = selectedWordId
+                        if (currentId != null) {
+                            val completedIds = ratedWordIds + currentId
+                            ratedWordIds = completedIds
+                            val nextId = wordQueue.dropWhile { it != currentId }
+                                .drop(1)
+                                .firstOrNull { it !in completedIds }
+                            selectedWordId = nextId
+                        }
+                        scope.launch { refreshCounts() }
+                    }
                 )
                 else -> when(page) {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due,
                         onWords = { page = Page.WORDS }, onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
-                    Page.WORDS -> WordListScreen(repo, dao, onWord = { selectedWordId = it })
+                    Page.WORDS -> WordListScreen(repo, dao, onWord = { id, queue ->
+                        wordQueue = queue
+                        ratedWordIds = emptySet()
+                        selectedWordId = id
+                    })
                     Page.READING -> ReadingScreen(repo)
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
                     Page.WRITING -> WritingScreen(repo, onNote = { noteTarget = it })
@@ -191,7 +208,7 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
     var dailyOnly by remember { mutableStateOf(true) }
     var dailyIds by remember { mutableStateOf(emptySet<Int>()) }
@@ -215,7 +232,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int)->Unit) {
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
             if(visibleWords.isEmpty()) item { Text(if(dailyOnly && search.isBlank()) "今天的计划已完成。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
             items(visibleWords,key={it.wordId}) { word ->
-                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
                         Text(word.rank.toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
                         Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
@@ -246,7 +263,7 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
                         Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Color.White.copy(alpha=.78f),fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
                     } }
                 }
-                items(w.senses,key={it.senseId}) { sense ->
+            items(w.senses,key={it.senseId}) { sense ->
                     Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
                             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){Text(sense.pos,color=Green,fontSize=12.sp,fontWeight=FontWeight.Bold);Text(sense.meaning,color=Ink,fontSize=17.sp,fontWeight=FontWeight.SemiBold)}
@@ -264,11 +281,12 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
                 }
                 item {
                     if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
-                    Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=16.sp,color=Ink)
+                    Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
+                    Text("选择后自动进入下一个计划单词；下次复习时间按你的熟悉程度安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("不会\n明天复习",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("有点了解\n3天后复习",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("熟悉\n7天后复习",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
                     }
                     currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                 }
