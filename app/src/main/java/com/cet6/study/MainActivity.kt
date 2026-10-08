@@ -36,13 +36,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val AppBg = Color(0xFFECF7E1)
-private val CardBg = Color(0xFFFFFFFF)
-private val Green = Color(0xFF3F7658)
-private val DarkGreen = Color(0xFF294D38)
-private val PaleGreen = Color(0xFFD3E8B7)
-private val PaleBlue = Color(0xFFCDE7FA)
-private val PaleYellow = Color(0xFFFFF4B6)
+private val AppBg = Color(0xFFF1F7EC)
+private val CardBg = Color(0xFFFCFDFB)
+private val Green = Color(0xFF52784D)
+private val DarkGreen = Color(0xFF34513A)
+private val PaleGreen = Color(0xFFDCEBD2)
+private val PaleBlue = Color(0xFFE7F1E4)
+private val PaleYellow = Color(0xFFFFF4C9)
 private val Ink = Color(0xFF24352E)
 private val Muted = Color(0xFF78877F)
 
@@ -63,9 +63,9 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, typography = Typography(), content = content)
 }
 
-private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文") }
+private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习") }
 private enum class WordListMode { NEW, REVIEW, ALL }
-private data class NoteTarget(val type: String, val id: Int, val title: String)
+private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "")
 
 @Composable
 private fun Cet6StudyApp() {
@@ -82,6 +82,7 @@ private fun Cet6StudyApp() {
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
+    var dueNotes by remember { mutableIntStateOf(0) }
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
 
@@ -89,13 +90,14 @@ private fun Cet6StudyApp() {
         val counts = withContext(Dispatchers.IO) { dao.studiedCount() to dao.dueCount(System.currentTimeMillis()) }
         studied = counts.first
         due = counts.second
+        dueNotes = withContext(Dispatchers.IO) { dao.dueNoteCount(System.currentTimeMillis()) }
     }
     LaunchedEffect(Unit) { refreshCounts() }
 
     Scaffold(
         containerColor = AppBg,
         bottomBar = {
-            if (selectedWordId == null && noteTarget == null) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
+            if (selectedWordId == null && noteTarget == null && page != Page.NOTE_REVIEW) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
                     Triple(Page.HOME, Icons.Outlined.Home, "首页"),
                     Triple(Page.WORDS, Icons.Outlined.BookmarkBorder, "单词"),
@@ -111,7 +113,8 @@ private fun Cet6StudyApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
-                noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null })
+                noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null; scope.launch { refreshCounts() } })
+                page == Page.NOTE_REVIEW -> NoteReviewScreen(dao, onBack = { page = Page.HOME; scope.launch { refreshCounts() } })
                 selectedWordId != null -> WordDetailScreen(
                     wordId = selectedWordId!!,
                     progress = (wordQueue.indexOf(selectedWordId!!) + 1).coerceAtLeast(1) to wordQueue.size,
@@ -132,19 +135,21 @@ private fun Cet6StudyApp() {
                     }
                 )
                 else -> when(page) {
-                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due,
+                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
                         onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
-                        onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
+                        onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
+                        onNoteReview = { page = Page.NOTE_REVIEW })
                     Page.WORDS -> WordListScreen(repo, dao, wordListMode, onMode = { wordListMode = it }, onWord = { id, queue ->
                         wordQueue = queue
                         ratedWordIds = emptySet()
                         selectedWordId = id
                     })
-                    Page.READING -> ReadingScreen(repo)
+                    Page.READING -> ReadingScreen(repo, dao, onNote = { noteTarget = it })
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
                     Page.WRITING -> WritingScreen(repo, onNote = { noteTarget = it })
+                    Page.NOTE_REVIEW -> Unit
                 }
             }
         }
@@ -152,7 +157,7 @@ private fun Cet6StudyApp() {
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -166,20 +171,20 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onN
             }
         }
         item {
-            Card(Modifier.fillMaxWidth().clickable(onClick=onWords),colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(24.dp)) {
+            Card(Modifier.fillMaxWidth().clickable(onClick=onWords),colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(24.dp)) {
                 Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
-                        Column { Text("今日学习",color=Color.White.copy(alpha=.78f),fontSize=13.sp); Text("词汇复习",color=Color.White,fontSize=21.sp,fontWeight=FontWeight.Bold) }
-                        Icon(Icons.Outlined.CheckCircle,null,tint=Color.White.copy(alpha=.85f),modifier=Modifier.size(27.dp))
+                        Column { Text("今日学习",color=Muted,fontSize=13.sp); Text("词汇学习",color=DarkGreen,fontSize=21.sp,fontWeight=FontWeight.Bold) }
+                        Icon(Icons.Outlined.CheckCircle,null,tint=Green,modifier=Modifier.size(27.dp))
                     }
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
                         StatPill("待复习",due.toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
                     Row(horizontalArrangement=Arrangement.spacedBy(9.dp)) {
-                        Button(onClick=onReview,enabled=due>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.16f),disabledContentColor=Color.White.copy(alpha=.65f)),shape=RoundedCornerShape(14.dp)) { Text("今日复习 $due",fontWeight=FontWeight.SemiBold) }
-                        Button(onClick=onNewWords,colors=ButtonDefaults.buttonColors(containerColor=PaleYellow,contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onReview,enabled=due>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("今日复习 $due",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onNewWords,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
                     }
-                    Text("新词每天最多显示 10 个；例句未齐的词暂不进入背诵",color=Color.White.copy(alpha=.72f),fontSize=12.sp)
+                    Text("新词每天最多显示 10 个；例句未齐的词暂不进入背诵",color=Muted,fontSize=12.sp)
                 }
             }
         }
@@ -191,6 +196,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onN
             }
         }
         item { ModuleCard("作文积累","题目、范文与个人笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onWriting) }
+        item { ModuleCard("笔记复习","到期笔记 $dueNotes 条",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
         item {
             Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp)) {
@@ -204,7 +210,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onN
     }
 }
 
-@Composable private fun StatPill(label:String,value:String) { Column(Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha=.12f)).padding(horizontal=13.dp,vertical=9.dp)) { Text(value,color=Color.White,fontWeight=FontWeight.Bold,fontSize=18.sp); Text(label,color=Color.White.copy(alpha=.75f),fontSize=11.sp) } }
+@Composable private fun StatPill(label:String,value:String) { Column(Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha=.58f)).padding(horizontal=13.dp,vertical=9.dp)) { Text(value,color=DarkGreen,fontWeight=FontWeight.Bold,fontSize=18.sp); Text(label,color=Muted,fontSize=11.sp) } }
 
 @Composable
 private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.graphics.vector.ImageVector,modifier:Modifier=Modifier,onClick:()->Unit) {
@@ -272,11 +278,11 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
             LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp),contentPadding=PaddingValues(bottom=28.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 item {
                     Text("${if(progress.second>0) "${progress.first} / ${progress.second} · " else ""}${if(currentStatus==null) "新词学习" else "今日复习"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=4.dp))
-                    Card(Modifier.fillMaxWidth().clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                        Text("第 ${w.rank} 位 · ${w.level}",color=Color.White.copy(alpha=.75f),fontSize=12.sp)
-                        Text(w.lemma,color=Color.White,fontSize=34.sp,fontWeight=FontWeight.Bold)
-                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Color.White.copy(alpha=.78f),fontSize=13.sp)
-                        Text(if(revealed) "释义与例句" else "先想想它的意思 · 点卡片揭晓",color=Color.White.copy(alpha=.9f),fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
+                    Card(Modifier.fillMaxWidth().clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Text("第 ${w.rank} 位 · ${w.level}",color=Muted,fontSize=12.sp)
+                        Text(w.lemma,color=DarkGreen,fontSize=36.sp,fontWeight=FontWeight.Bold)
+                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Muted,fontSize=13.sp)
+                        Text(if(revealed) "释义与例句" else "先想想它的意思 · 点卡片揭晓",color=Green,fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
                     } }
                 }
                 if(revealed) items(w.senses,key={it.senseId}) { sense ->
@@ -326,40 +332,150 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
     }
 }
 
+@Composable
+private fun NoteReviewScreen(dao:UserDao,onBack:()->Unit) {
+    var notes by remember { mutableStateOf(emptyList<UserNote>()) }
+    var index by remember { mutableIntStateOf(0) }
+    var revealed by remember(index) { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    val scope=rememberCoroutineScope()
+    LaunchedEffect(Unit) { notes=withContext(Dispatchers.IO) { dao.dueNotes(System.currentTimeMillis()) } }
+    Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+        TopAppBar(title={Text("笔记复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+        val note=notes.getOrNull(index)
+        if(note==null) {
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) { Text("今天没有到期笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen); Text("新记的笔记会进入后续复习安排。",color=Muted); Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")} } }
+        } else {
+            Text("${index+1} / ${notes.size} 条待复习",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=10.dp))
+            Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                    Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                    Text(if(revealed) note.content else "先回忆笔记内容，点卡片查看",fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                }
+            }
+            if(revealed) {
+                Text("这次记得怎么样？",fontSize=14.sp,color=Muted,modifier=Modifier.padding(top=16.dp,bottom=8.dp))
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    ReviewButton("不会",Modifier.weight(1f),saving){ saveNoteRating("不会",note,dao,scope,{saving=true}){ saving=false; index++ } }
+                    ReviewButton("有点了解",Modifier.weight(1f),saving){ saveNoteRating("有点了解",note,dao,scope,{saving=true}){ saving=false; index++ } }
+                    ReviewButton("熟悉",Modifier.weight(1f),saving){ saveNoteRating("熟悉",note,dao,scope,{saving=true}){ saving=false; index++ } }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+private fun saveNoteRating(value:String,note:UserNote,dao:UserDao,scope:kotlinx.coroutines.CoroutineScope,onStart:()->Unit,onComplete:()->Unit) {
+    onStart()
+    scope.launch(Dispatchers.IO) {
+        val now=System.currentTimeMillis()
+        val schedule=scheduleNextReview(value,note.reviewStage,now)
+        dao.saveNote(note.copy(familiarity=value,reviewStage=schedule.stage,nextReview=schedule.nextReviewMillis,lastReviewed=now,reviewCount=note.reviewCount+1,updatedAt=now))
+        withContext(Dispatchers.Main) { onComplete() }
+    }
+}
+
 @Composable private fun ReviewButton(label:String,modifier:Modifier,saving:Boolean,onClick:()->Unit) {
     OutlinedButton(onClick=onClick,modifier=modifier,enabled=!saving,shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(horizontal=4.dp,vertical=10.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) { Text(label,fontSize=12.sp) }
 }
 
 @Composable
-private fun ReadingScreen(repo:ContentDb) {
+private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     var selectedId by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("") }
     var readingTypes by remember { mutableStateOf(emptyList<String>()) }
-    var mode by remember { mutableStateOf("精读") }
+    var mode by remember { mutableStateOf("逐句精读") }
     var sentences by remember { mutableStateOf(emptyList<ReadingSentence>()) }
     var questions by remember { mutableStateOf(emptyList<ReadingQuestion>()) }
+    var statuses by remember { mutableStateOf(emptyList<UserReadingStatus>()) }
+    var selectedPassage by remember { mutableIntStateOf(1) }
+    var sentenceIndex by remember { mutableIntStateOf(0) }
+    var revealed by remember(selectedId,selectedType,selectedPassage,sentenceIndex) { mutableStateOf(false) }
+    val scope=rememberCoroutineScope()
     LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")}; if(papers.isNotEmpty()) selectedId=papers.first().paperId }
     LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) { readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}; selectedType=readingTypes.firstOrNull().orEmpty() } }
-    LaunchedEffect(selectedId,selectedType,mode) { if(selectedId.isNotBlank() && selectedType.isNotBlank()) withContext(Dispatchers.IO) { sentences=repo.getReadingSentences(selectedId,selectedType); questions=repo.getQuestions(selectedId,selectedType) } }
+    LaunchedEffect(selectedId,selectedType) {
+        if(selectedId.isNotBlank() && selectedType.isNotBlank()) {
+            val loaded=withContext(Dispatchers.IO) { Triple(repo.getReadingSentences(selectedId,selectedType),repo.getQuestions(selectedId,selectedType),dao.readingStatuses(selectedId,selectedType)) }
+            sentences=loaded.first
+            questions=loaded.second
+            statuses=loaded.third
+            selectedPassage=loaded.first.firstOrNull()?.passageNo ?: 1
+            sentenceIndex=0
+        }
+    }
+    val passageNos=sentences.mapNotNull{it.passageNo}.distinct().sorted()
+    val passageSentences=sentences.filter{it.passageNo==selectedPassage}
+    val sentence=passageSentences.getOrNull(sentenceIndex)
+    val statusByUnit=statuses.associateBy{it.unitId}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("阅读精读", "逐句查看译文与结构分析，答案按原题关联")
+        ScreenHeading("阅读精读", "逐句回忆和揭晓，也可以连续通读整篇")
         PaperSelector(papers,selectedId,{selectedId=it})
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) { listOf("精读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
-        if(mode=="精读") LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            items(sentences,key={it.unitId}) { s ->
-                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    if(s.paragraphNo!=null && selectedType=="matching") Text("第 ${s.paragraphNo} 段",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Green)
-                    Text(s.text,fontSize=15.sp,lineHeight=22.sp,color=Ink)
-                    HorizontalDivider(color=Color(0xFFE8EEE9))
-                    Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
-                    Text("怎么看",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(cleanMarkup(s.analysis).ifBlank{"暂无结构分析"},fontSize=13.sp,lineHeight=19.sp,color=Muted)
-                } }
+        Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.padding(vertical=6.dp)) { listOf("逐句精读","整篇通读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
+        if(mode!="题目答案") {
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.padding(bottom=8.dp)) {
+                passageNos.forEach { passageNo ->
+                    val rows=sentences.filter{it.passageNo==passageNo}
+                    val done=rows.count{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+                    FilterChip(selected=selectedPassage==passageNo,onClick={selectedPassage=passageNo;sentenceIndex=0},label={Text("第${passageNo}篇 $done/${rows.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=if(done==rows.size) PaleGreen else PaleBlue))
+                }
             }
-        } else LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            items(questions,key={it.unitId}) { q -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.padding(15.dp),verticalArrangement=Arrangement.spacedBy(7.dp)) {
+        }
+        when(mode) {
+            "逐句精读" -> if(sentence!=null) {
+                val status=statusByUnit[sentence.unitId]
+                Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(sentence.text),"reading",sentence.unitId,"阅读笔记",onNote)
+                        if(revealed) {
+                            HorizontalDivider(color=PaleGreen)
+                            Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                            Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                        } else Text("先自己理解，点卡片查看译文和分析",fontSize=13.sp,color=Muted)
+                    }
+                }
+                if(revealed) {
+                    Row(Modifier.fillMaxWidth().padding(top=12.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                        listOf("完全解决","熟悉","还不熟").forEach { rating ->
+                            ReviewButton(rating,Modifier.weight(1f),false) {
+                                scope.launch(Dispatchers.IO) {
+                                    dao.saveReadingStatus(UserReadingStatus(sentence.unitId,selectedId,selectedType,sentence.passageNo ?: selectedPassage,rating))
+                                    statuses=dao.readingStatuses(selectedId,selectedType)
+                                    withContext(Dispatchers.Main) { if(sentenceIndex<passageSentences.lastIndex) sentenceIndex++ }
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                    TextButton(onClick={sentenceIndex=(sentenceIndex-1).coerceAtLeast(0)}){Text("上一句",color=Green)}
+                    TextButton(onClick={sentenceIndex=(sentenceIndex+1).coerceAtMost((passageSentences.size-1).coerceAtLeast(0))}){Text("下一句",color=Green)}
+                }
+            } else Text("这篇暂无可显示的句子。",color=Muted,modifier=Modifier.padding(20.dp))
+            "整篇通读" -> if(passageSentences.isNotEmpty()) {
+                Text("整篇连续阅读 · ${passageSentences.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(vertical=8.dp))
+                LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    item { Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(passageSentences.joinToString(" "){it.text}),"reading",passageSentences.first().unitId,"阅读篇章笔记",onNote)
+                    }} }
+                }
+                Button(onClick={
+                    scope.launch(Dispatchers.IO) {
+                        passageSentences.forEach { dao.saveReadingStatus(UserReadingStatus(it.unitId,selectedId,selectedType,it.passageNo ?: selectedPassage,"熟悉")) }
+                        statuses=dao.readingStatuses(selectedId,selectedType)
+                    }
+                },modifier=Modifier.fillMaxWidth(),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(16.dp)){Text("标记本篇已精读")}
+            }
+            else -> LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+              items(questions,key={it.unitId}) { q -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
                 Text(q.questionNo?.let{"第 $it 题"} ?: "题目",color=Green,fontSize=11.sp,fontWeight=FontWeight.Bold)
                 Text(q.text,color=Ink,fontSize=14.sp,lineHeight=20.sp)
                 Text("答案：${q.answer.ifBlank{"待核对"}}${if(q.optionText.isNotBlank()) "  ${q.optionText}" else ""}",color=DarkGreen,fontWeight=FontWeight.SemiBold,fontSize=13.sp)
@@ -370,7 +486,20 @@ private fun ReadingScreen(repo:ContentDb) {
                     Text("对应段落原文",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
                     Text(q.evidence,color=Muted,fontSize=12.sp,lineHeight=18.sp)
                 }
-            } } }
+              } } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit) {
+    var field by remember(value) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(value)) }
+    Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
+        androidx.compose.foundation.text.BasicTextField(value=field,onValueChange={field=it},readOnly=true,textStyle=MaterialTheme.typography.bodyLarge.copy(color=Ink,lineHeight=25.sp),cursorBrush=androidx.compose.ui.graphics.SolidColor(Green),modifier=Modifier.fillMaxWidth())
+        if(!field.selection.collapsed) {
+            val selected=field.annotatedString.text.substring(field.selection.min,field.selection.max)
+            TextButton(onClick={if(selected.isNotBlank()) onNote(NoteTarget(type,itemId,title,selected))}) { Text("为选中内容做笔记",color=Green) }
         }
     }
 }
@@ -406,20 +535,33 @@ private fun highlightedText(text:String,json:String):androidx.compose.ui.text.An
 @Composable
 private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var rows by remember { mutableStateOf(emptyList<TranslationItem>()) }
+    var index by remember(selectedId) { mutableIntStateOf(0) }
+    var revealed by remember(selectedId,index) { mutableStateOf(false) }
     LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("translation")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
-    LaunchedEffect(selectedId){if(selectedId.isNotBlank())rows=withContext(Dispatchers.IO){repo.getTranslations(selectedId)}}
+    LaunchedEffect(selectedId){if(selectedId.isNotBlank()){rows=withContext(Dispatchers.IO){repo.getTranslations(selectedId)};index=0}}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("翻译训练","先在心里作答，再对照参考译文和优化译文")
+        ScreenHeading("翻译训练","先自己翻译，点卡片后查看参考译文和优化译文")
         PaperSelector(papers,selectedId,{selectedId=it})
-        LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=22.dp),verticalArrangement=Arrangement.spacedBy(11.dp)) {
-            items(rows,key={it.unitId}){item-> Card(colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(11.dp)){
-                Text("第 ${item.orderNo} 句",fontSize=11.sp,color=Green,fontWeight=FontWeight.Bold)
-                Text(item.chinese,fontSize=15.sp,lineHeight=22.sp,color=Ink)
-                if(item.reference.isBlank() && item.optimized.isBlank()) Text("参考译文正在补入",fontSize=12.sp,color=Muted)
-                if(item.reference.isNotBlank()){Text("参考译文",fontSize=11.sp,color=Green,fontWeight=FontWeight.SemiBold);Text(item.reference,fontSize=13.sp,lineHeight=19.sp,color=Ink)}
-                if(item.optimized.isNotBlank()){Text("优化译文",fontSize=11.sp,color=Green,fontWeight=FontWeight.SemiBold);Text(item.optimized,fontSize=13.sp,lineHeight=19.sp,color=Ink)}
-                TextButton(onClick={onNote(NoteTarget("translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句"))}){Icon(Icons.Outlined.BookmarkBorder,null);Text("添加笔记")}
-            }}}
+        val item=rows.getOrNull(index)
+        if(item!=null) {
+            Text("第 ${index+1} / ${rows.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
+            Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                    Text("先在心里翻译",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold)
+                    Text(item.chinese,fontSize=19.sp,lineHeight=31.sp,color=DarkGreen,fontWeight=FontWeight.Medium)
+                    if(revealed) {
+                        HorizontalDivider(color=Color.White.copy(alpha=.8f))
+                        if(item.reference.isNotBlank()) { Text("参考译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.reference),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
+                        if(item.optimized.isNotBlank()) { Text("优化译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.optimized),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
+                        if(item.reference.isBlank()&&item.optimized.isBlank()) Text("参考译文正在补入",fontSize=13.sp,color=Muted)
+                    } else Text("点卡片查看译文",fontSize=13.sp,color=Muted)
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical=12.dp),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
+                TextButton(onClick={index=(index-1).coerceAtLeast(0)}){Text("上一句",color=Green)}
+                if(!revealed) TextButton(onClick={revealed=true}){Text("查看译文",color=Green)}
+                TextButton(onClick={index=(index+1).coerceAtMost(rows.lastIndex)}){Text("下一句",color=Green)}
+            }
         }
     }
 }
@@ -430,17 +572,16 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
     LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("writing")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
     LaunchedEffect(selectedId){if(selectedId.isNotBlank())item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("作文积累","题目与范文整篇展示，选好表达可以记进笔记")
+        ScreenHeading("作文积累","长按选择好词好句，加入可复习的个人笔记")
         PaperSelector(papers,selectedId,{selectedId=it})
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            item { Card(colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(18.dp)){Text("写作题目",color=Color.White.copy(alpha=.75f),fontSize=12.sp);Text(current.prompt,color=Color.White,fontSize=15.sp,lineHeight=23.sp,modifier=Modifier.padding(top=7.dp))}} }
+            item { Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold);Text(current.prompt,color=DarkGreen,fontSize=16.sp,lineHeight=25.sp)}} }
             items(current.samples){sample->
                 val label=if(sample.type=="excellent")"优秀范文" else "参考范文"
-                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
+                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
                     Text(label,color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold)
-                    Text(highlightedText(sample.text,sample.highlightsJson),color=Ink,fontSize=14.sp,lineHeight=22.sp)
-                    TextButton(onClick={onNote(NoteTarget("writing",current.promptUnitId,"作文笔记 · $label"))}){Icon(Icons.Outlined.BookmarkBorder,null);Text("记录好词好句")}
+                    SelectableNoteText(highlightedText(sample.text,sample.highlightsJson),"writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote)
                 }}
             }
             item { if(current.samples.isEmpty()) Text("这套范文正在补入。",color=Muted) }
@@ -450,17 +591,29 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 
 @Composable
 private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
-    var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };val scope=rememberCoroutineScope()
-    LaunchedEffect(target){withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull()?.let{text=it.content};loaded=true}
-    Column(Modifier.fillMaxSize().padding(18.dp)) {
+    var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };var current by remember(target){mutableStateOf<UserNote?>(null)};val scope=rememberCoroutineScope()
+    LaunchedEffect(target){
+        current=withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull{it.sourceText==target.sourceText}
+        text=current?.content.orEmpty()
+        loaded=true
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal=20.dp, vertical=12.dp)) {
         TopAppBar(title={Text("学习笔记")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
-        Text(target.title,fontSize=19.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(vertical=16.dp))
-        OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f),placeholder={Text("记下短语、句式或自己的理解")},shape=RoundedCornerShape(18.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
-        Button(onClick={scope.launch(Dispatchers.IO){dao.saveNote(UserNote(itemType=target.type,itemId=target.id,content=text));saved=true}},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp),shape=RoundedCornerShape(15.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存" else "保存笔记")}
+        Text(target.title,fontSize=22.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(top=18.dp,bottom=12.dp))
+        if(target.sourceText.isNotBlank()) Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) { Text(target.sourceText,fontSize=15.sp,lineHeight=23.sp,color=Ink,modifier=Modifier.fillMaxWidth().padding(17.dp)) }
+        OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f).padding(top=14.dp),placeholder={Text("写下释义、表达用法或自己的理解")},shape=RoundedCornerShape(20.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
+        Button(onClick={scope.launch {
+            val now=System.currentTimeMillis()
+            val old=current
+            val draft=old?.copy(content=text,updatedAt=now) ?: UserNote(itemType=target.type,itemId=target.id,sourceText=target.sourceText,content=text,updatedAt=now,reviewStage=-1,nextReview=now+24L*60L*60L*1000L)
+            val newId=withContext(Dispatchers.IO){dao.saveNote(draft)}
+            current=draft.copy(noteId=newId)
+            saved=true
+        }},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp,bottom=8.dp),shape=RoundedCornerShape(17.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存并加入笔记复习" else "保存笔记")}
     }
 }
 
-@Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=18.dp,bottom=12.dp)){Text(title,fontSize=23.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=3.dp))}}
+@Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=22.dp,bottom=16.dp)){Text(title,fontSize=24.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=14.sp,lineHeight=20.sp,color=Muted,modifier=Modifier.padding(top=6.dp))}}
 
 @Composable
 private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(String)->Unit) {
