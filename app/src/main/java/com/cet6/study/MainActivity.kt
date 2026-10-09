@@ -414,7 +414,7 @@ private fun SelectableReadingText(
                 setTextColor(android.graphics.Color.rgb(36,53,46))
                 textSize=15f
                 setLineSpacing(0f,1.4f)
-                textIsSelectable=true
+                setTextIsSelectable(true)
                 movementMethod=LinkMovementMethod.getInstance()
                 customSelectionActionModeCallback=object:ActionMode.Callback {
                     override fun onCreateActionMode(mode:ActionMode,menu:Menu):Boolean {
@@ -426,7 +426,7 @@ private fun SelectableReadingText(
                         if(item.itemId!=1) return false
                         val start=selectionStart.coerceAtLeast(0)
                         val end=selectionEnd.coerceAtLeast(start)
-                        if(end>start) currentNoteSelection.value=currentText.value.subSequence(start,end).toString()
+                        if(end>start) currentNoteSelection(currentText.subSequence(start,end).toString())
                         mode.finish()
                         return true
                     }
@@ -439,7 +439,7 @@ private fun SelectableReadingText(
             Regex("_{2,}\\s*(\\d+)\\s*_{2,}").findAll(text).forEach { match ->
                 val number=match.groupValues[1].toIntOrNull() ?: return@forEach
                 styled.setSpan(object:ClickableSpan() {
-                    override fun onClick(widget:View) { currentBlankClick.value(number) }
+                    override fun onClick(widget:View) { currentBlankClick(number) }
                     override fun updateDrawState(ds:TextPaint) {
                         ds.color=android.graphics.Color.rgb(70,138,112)
                         ds.isUnderlineText=false
