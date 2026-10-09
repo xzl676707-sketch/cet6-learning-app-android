@@ -6,6 +6,9 @@ import androidx.room.Database
 import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Insert
+import androidx.room.Index
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
@@ -235,7 +238,32 @@ data class UserWordStatus(
     val familiarity: String,
     @androidx.room.ColumnInfo(name="next_review") val nextReview: Long,
     @androidx.room.ColumnInfo(name="last_reviewed") val lastReviewed: Long,
-    @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int
+    @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int,
+    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0
+)
+
+@Entity(tableName = "user_reading_status", indices = [Index(value = ["paper_id", "reading_type", "passage_no"])])
+data class UserReadingStatus(
+    @PrimaryKey @androidx.room.ColumnInfo(name = "unit_id") val unitId: Int,
+    @androidx.room.ColumnInfo(name = "paper_id") val paperId: String,
+    @androidx.room.ColumnInfo(name = "reading_type") val readingType: String,
+    @androidx.room.ColumnInfo(name = "passage_no") val passageNo: Int,
+    val familiarity: String,
+    @androidx.room.ColumnInfo(name = "studied_at") val studiedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "user_review_history",
+    indices = [Index(value = ["word_id", "reviewed_at"])]
+)
+data class UserReviewHistory(
+    @PrimaryKey(autoGenerate = true) @androidx.room.ColumnInfo(name = "review_id") val reviewId: Long = 0,
+    @androidx.room.ColumnInfo(name = "word_id") val wordId: Int,
+    @androidx.room.ColumnInfo(name = "reviewed_at") val reviewedAt: Long,
+    val familiarity: String,
+    @androidx.room.ColumnInfo(name = "stage_before") val stageBefore: Int,
+    @androidx.room.ColumnInfo(name = "stage_after") val stageAfter: Int,
+    @androidx.room.ColumnInfo(name = "interval_days") val intervalDays: Int
 )
 
 @Entity(tableName = "user_notes")
@@ -244,7 +272,13 @@ data class UserNote(
     @androidx.room.ColumnInfo(name="item_type") val itemType: String,
     @androidx.room.ColumnInfo(name="item_id") val itemId: Int,
     val content: String,
-    @androidx.room.ColumnInfo(name="updated_at") val updatedAt: Long = System.currentTimeMillis()
+    @androidx.room.ColumnInfo(name="updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    @androidx.room.ColumnInfo(name="source_text", defaultValue = "''") val sourceText: String = "",
+    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0,
+    @androidx.room.ColumnInfo(name="next_review", defaultValue = "0") val nextReview: Long = 0L,
+    @androidx.room.ColumnInfo(name="last_reviewed", defaultValue = "0") val lastReviewed: Long = 0L,
+    @androidx.room.ColumnInfo(name="review_count", defaultValue = "0") val reviewCount: Int = 0,
+    @androidx.room.ColumnInfo(defaultValue = "''") val familiarity: String = ""
 )
 
 @Dao
@@ -259,13 +293,66 @@ interface UserDao {
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class],version = 1,exportSchema = false)
+@Database(
+    entities = [UserWordStatus::class, UserNote::class, UserReviewHistory::class, UserReadingStatus::class],
+    version = 4,
+    exportSchema = false
+)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
         @Volatile private var instance: UserDatabase? = null
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_word_status ADD COLUMN review_stage INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_review_history (
+                        review_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        word_id INTEGER NOT NULL,
+                        reviewed_at INTEGER NOT NULL,
+                        familiarity TEXT NOT NULL,
+                        stage_before INTEGER NOT NULL,
+                        stage_after INTEGER NOT NULL,
+                        interval_days INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_review_history_word_id_reviewed_at ON user_review_history(word_id, reviewed_at)")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN source_text TEXT NOT NULL DEFAULT ''")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN review_stage INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN next_review INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN last_reviewed INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN familiarity TEXT NOT NULL DEFAULT ''")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_reading_status (
+                        unit_id INTEGER NOT NULL PRIMARY KEY,
+                        paper_id TEXT NOT NULL,
+                        reading_type TEXT NOT NULL,
+                        passage_no INTEGER NOT NULL,
+                        familiarity TEXT NOT NULL,
+                        studied_at INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_reading_status_paper_id_reading_type_passage_no ON user_reading_status(paper_id, reading_type, passage_no)")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Version 4 keeps the version 3 user-data schema and adds app behavior only.
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db").build().also { instance=it }
+            instance ?: Room.databaseBuilder(context.applicationContext, UserDatabase::class.java, "user_data.db")
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .build().also { instance = it }
         }
     }
 }
