@@ -615,9 +615,10 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
                     override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
                     override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
                         if(item.itemId!=1) return false
-                        val start=selectionStart.coerceAtLeast(0)
-                        val end=selectionEnd.coerceAtLeast(start)
-                        if(end>start) currentNoteSelection(currentText.substring(start,end))
+                        val selectedText=text?.toString().orEmpty()
+                        val start=minOf(selectionStart,selectionEnd).coerceIn(0,selectedText.length)
+                        val end=maxOf(selectionStart,selectionEnd).coerceIn(start,selectedText.length)
+                        if(end>start) currentNoteSelection(selectedText.substring(start,end))
                         mode.finish()
                         return true
                     }
