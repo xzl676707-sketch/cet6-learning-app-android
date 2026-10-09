@@ -79,6 +79,11 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
 private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习") }
 private enum class WordListMode { NEW, REVIEW, ALL }
 private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "", val storageType: String = type)
+private sealed class ReviewQueueEntry {
+    abstract val dueAt: Long
+    data class Word(val wordId: Int, override val dueAt: Long) : ReviewQueueEntry()
+    data class Note(val note: UserNote) : ReviewQueueEntry() { override val dueAt: Long get() = note.nextReview }
+}
 
 @Composable
 private fun Cet6StudyApp() {
@@ -87,6 +92,7 @@ private fun Cet6StudyApp() {
     val userDb = remember { UserDatabase.get(context) }
     val dao = userDb.dao()
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     var page by remember { mutableStateOf(Page.HOME) }
     var selectedWordId by remember { mutableStateOf<Int?>(null) }
     var wordQueue by remember { mutableStateOf(emptyList<Int>()) }
@@ -123,6 +129,7 @@ private fun Cet6StudyApp() {
 
     Scaffold(
         containerColor = AppBg,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (selectedWordId == null && noteTarget == null && page != Page.NOTE_REVIEW) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
@@ -141,7 +148,23 @@ private fun Cet6StudyApp() {
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
                 noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null; scope.launch { refreshCounts() } })
-                page == Page.NOTE_REVIEW -> NoteReviewScreen(dao, onBack = { page = Page.HOME; scope.launch { refreshCounts() } })
+                page == Page.NOTE_REVIEW -> DailyReviewScreen(
+                    repo = repo,
+                    dao = dao,
+                    dailyLimit = (reviewGoal - reviewDoneToday).coerceAtLeast(0),
+                    snackbarHostState = snackbarHostState,
+                    onBack = { page = Page.HOME; scope.launch { refreshCounts() } },
+                    onReviewDone = {
+                        reviewDoneToday += 1
+                        goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        scope.launch { refreshCounts() }
+                    },
+                    onReviewUndo = {
+                        reviewDoneToday = (reviewDoneToday - 1).coerceAtLeast(0)
+                        goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        scope.launch { refreshCounts() }
+                    }
+                )
                 selectedWordId != null -> WordDetailScreen(
                     wordId = selectedWordId!!,
                     progress = (wordQueue.indexOf(selectedWordId!!) + 1).coerceAtLeast(1) to wordQueue.size,
@@ -171,7 +194,7 @@ private fun Cet6StudyApp() {
                 else -> when(page) {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, reviewGoal, newDoneToday, reviewDoneToday,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
-                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
+                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.NOTE_REVIEW },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
                         onNoteReview = { page = Page.NOTE_REVIEW },
@@ -218,12 +241,12 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
                         Icon(Icons.Outlined.CheckCircle,null,tint=Green,modifier=Modifier.size(27.dp))
                     }
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                        StatPill("待复习",due.toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
+                        StatPill("待复习",(due+dueNotes).toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
                     DailyGoalProgress("新词", newDone, newGoal, Green)
                     DailyGoalProgress("复习", reviewDone, reviewGoal, Color(0xFF8C9F63))
                     Row(horizontalArrangement=Arrangement.spacedBy(9.dp), verticalAlignment=Alignment.CenterVertically) {
-                        Button(onClick=onReview,enabled=due>0 && reviewDone<reviewGoal,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onReview,enabled=(due+dueNotes)>0 && reviewDone<reviewGoal,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习 ${minOf(due+dueNotes,(reviewGoal-reviewDone).coerceAtLeast(0))}",fontWeight=FontWeight.SemiBold) }
                         Button(onClick=onNewWords,enabled=newDone<newGoal,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.5f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
                         TextButton(onClick={showGoalDialog=true},contentPadding=PaddingValues(horizontal=4.dp)) { Text("设目标",fontSize=12.sp,color=Green) }
                     }
@@ -239,7 +262,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
             }
         }
         item { ModuleCard("作文积累","题目、范文与个人笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onWriting) }
-        item { ModuleCard("笔记复习","到期笔记 $dueNotes 条",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
+        item { ModuleCard("今日复习","单词 $due · 笔记 $dueNotes",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
         item {
             Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp)) {
@@ -357,15 +380,20 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:(Boolean)->Unit) {
-    var detail by remember { mutableStateOf<WordDetail?>(null) }
-    var currentStatus by remember { mutableStateOf<UserWordStatus?>(null) }
-    var saving by remember { mutableStateOf(false) }
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null) {
+    var detail by remember(wordId) { mutableStateOf<WordDetail?>(null) }
+    var currentStatus by remember(wordId) { mutableStateOf<UserWordStatus?>(null) }
+    var saving by remember(wordId) { mutableStateOf(false) }
     var revealed by remember(wordId) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     LaunchedEffect(wordId) { withContext(Dispatchers.IO) { detail=repo.getWord(wordId); currentStatus=dao.status(wordId) } }
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(title={Text("单词详情")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+        TopAppBar(
+            title={Text("单词详情")},
+            navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},
+            actions={ if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text("彻底熟悉",color=Green)} },
+            colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg)
+        )
         val w=detail
         if(w==null) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Green)} else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp),contentPadding=PaddingValues(bottom=28.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
@@ -398,12 +426,16 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                     if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
                     Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
-                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
-                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
-                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                    if(currentStatus?.isMastered==true) {
+                        Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
+                    } else {
+                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                        }
+                        currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                     }
-                    currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                 }
             }
         }
@@ -426,36 +458,114 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
 }
 
 @Composable
-private fun NoteReviewScreen(dao:UserDao,onBack:()->Unit) {
-    var notes by remember { mutableStateOf(emptyList<UserNote>()) }
+private fun DailyReviewScreen(
+    repo:ContentDb,
+    dao:UserDao,
+    dailyLimit:Int,
+    snackbarHostState:SnackbarHostState,
+    onBack:()->Unit,
+    onReviewDone:()->Unit,
+    onReviewUndo:()->Unit
+) {
+    var entries by remember { mutableStateOf(emptyList<ReviewQueueEntry>()) }
+    var loading by remember { mutableStateOf(true) }
     var index by remember { mutableIntStateOf(0) }
-    var revealed by remember(index) { mutableStateOf(false) }
+    var completedCount by remember { mutableIntStateOf(0) }
+    val scope=rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        entries=withContext(Dispatchers.IO) {
+            val now=System.currentTimeMillis()
+            val words=dao.dueWordStatuses(now).map { ReviewQueueEntry.Word(it.wordId,it.nextReview) }
+            val notes=dao.dueNotes(now).map { ReviewQueueEntry.Note(it) }
+            (words+notes).sortedBy { it.dueAt }.take(dailyLimit)
+        }
+        loading=false
+    }
+
+    val current=entries.getOrNull(index)
+    when {
+        loading -> Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Green) }
+        current==null -> Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
+                Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                    Text(if(dailyLimit<=0) "今日复习目标已完成" else "当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                    Text("未完成的到期内容会继续保留在队列里。",color=Muted)
+                    Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")}
+                }
+            }
+        }
+        current is ReviewQueueEntry.Word -> WordDetailScreen(
+            wordId=current.wordId,
+            progress=(completedCount+1) to (completedCount+entries.size),
+            repo=repo,
+            dao=dao,
+            onBack=onBack,
+            onRated={
+                onReviewDone()
+                completedCount+=1
+                entries=entries.toMutableList().apply { removeAt(index) }
+            },
+            onMastered={
+                val masteredEntry=current
+                scope.launch {
+                    withContext(Dispatchers.IO) { dao.setWordMastered(masteredEntry.wordId,true,Long.MAX_VALUE) }
+                    onReviewDone()
+                    completedCount+=1
+                    entries=entries.toMutableList().apply { removeAt(index) }
+                    val result=snackbarHostState.showSnackbar(
+                        message="已标记为彻底熟悉",
+                        actionLabel="撤销",
+                        withDismissAction=true,
+                        duration=SnackbarDuration.Short
+                    )
+                    if(result==SnackbarResult.ActionPerformed) {
+                        withContext(Dispatchers.IO) { dao.setWordMastered(masteredEntry.wordId,false,System.currentTimeMillis()) }
+                        onReviewUndo()
+                        completedCount=(completedCount-1).coerceAtLeast(0)
+                        entries=entries.toMutableList().apply { add(index.coerceIn(0,size),masteredEntry.copy(dueAt=System.currentTimeMillis())) }
+                    }
+                }
+            }
+        )
+        current is ReviewQueueEntry.Note -> ReviewNoteCard(
+            note=current.note,
+            progress=(completedCount+1) to (completedCount+entries.size),
+            dao=dao,
+            onBack=onBack,
+            onComplete={
+                onReviewDone()
+                completedCount+=1
+                entries=entries.toMutableList().apply { removeAt(index) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBack:()->Unit,onComplete:()->Unit) {
+    var revealed by remember(note.noteId) { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
-    LaunchedEffect(Unit) { notes=withContext(Dispatchers.IO) { dao.dueNotes(System.currentTimeMillis()) } }
     Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
-        TopAppBar(title={Text("笔记复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
-        val note=notes.getOrNull(index)
-        if(note==null) {
-            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) { Text("今天没有到期笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen); Text("新记的笔记会进入后续复习安排。",color=Muted); Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")} } }
-        } else {
-            Text("${index+1} / ${notes.size} 条待复习",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=10.dp))
-            Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(24.dp)) {
-                Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
-                    Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
-                    Text(if(revealed) note.content else "先回忆笔记内容，点卡片查看",fontSize=15.sp,lineHeight=24.sp,color=Ink)
-                }
+        TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+        Text("${progress.first} / ${progress.second} · 笔记",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=10.dp,bottom=10.dp))
+        Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(24.dp)) {
+            Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                Text(if(revealed) note.content else "点卡片空白处查看笔记",fontSize=15.sp,lineHeight=24.sp,color=Ink)
             }
-            if(revealed) {
-                Text("这次记得怎么样？",fontSize=14.sp,color=Muted,modifier=Modifier.padding(top=16.dp,bottom=8.dp))
-                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    ReviewButton("不会",Modifier.weight(1f),saving){ saveNoteRating("不会",note,dao,scope,{saving=true}){ saving=false; index++ } }
-                    ReviewButton("有点了解",Modifier.weight(1f),saving){ saveNoteRating("有点了解",note,dao,scope,{saving=true}){ saving=false; index++ } }
-                    ReviewButton("熟悉",Modifier.weight(1f),saving){ saveNoteRating("熟悉",note,dao,scope,{saving=true}){ saving=false; index++ } }
-                }
-            }
-            Spacer(Modifier.height(20.dp))
         }
+        if(revealed) {
+            Text("这次记得怎么样？",fontSize=14.sp,color=Muted,modifier=Modifier.padding(top=16.dp,bottom=8.dp))
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                ReviewButton("不会",Modifier.weight(1f),saving){ saveNoteRating("不会",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+                ReviewButton("有点了解",Modifier.weight(1f),saving){ saveNoteRating("有点了解",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+                ReviewButton("熟悉",Modifier.weight(1f),saving){ saveNoteRating("熟悉",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
     }
 }
 
