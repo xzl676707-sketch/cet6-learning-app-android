@@ -96,8 +96,22 @@ private fun Cet6StudyApp() {
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
     var dueNotes by remember { mutableIntStateOf(0) }
+    val goalPrefs = remember { context.getSharedPreferences("daily_word_goals", android.content.Context.MODE_PRIVATE) }
+    val todayKey = java.time.LocalDate.now().toString()
+    var newGoal by remember { mutableIntStateOf(goalPrefs.getInt("new_goal", 10).coerceIn(0, 100)) }
+    var reviewGoal by remember { mutableIntStateOf(goalPrefs.getInt("review_goal", 20).coerceIn(0, 200)) }
+    var newDoneToday by remember { mutableIntStateOf(0) }
+    var reviewDoneToday by remember { mutableIntStateOf(0) }
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
+
+    LaunchedEffect(todayKey) {
+        if (goalPrefs.getString("progress_date", null) != todayKey) {
+            goalPrefs.edit().putString("progress_date", todayKey).putInt("new_done", 0).putInt("review_done", 0).apply()
+        }
+        newDoneToday = goalPrefs.getInt("new_done", 0)
+        reviewDoneToday = goalPrefs.getInt("review_done", 0)
+    }
 
     suspend fun refreshCounts() {
         val counts = withContext(Dispatchers.IO) { dao.studiedCount() to dao.dueCount(System.currentTimeMillis()) }
@@ -134,7 +148,14 @@ private fun Cet6StudyApp() {
                     repo = repo,
                     dao = dao,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
-                    onRated = {
+                    onRated = { wasNew ->
+                        if (wasNew) {
+                            newDoneToday += 1
+                            goalPrefs.edit().putInt("new_done", newDoneToday).apply()
+                        } else {
+                            reviewDoneToday += 1
+                            goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        }
                         val currentId = selectedWordId
                         if (currentId != null) {
                             val completedIds = ratedWordIds + currentId
@@ -148,13 +169,18 @@ private fun Cet6StudyApp() {
                     }
                 )
                 else -> when(page) {
-                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes,
+                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, reviewGoal, newDoneToday, reviewDoneToday,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
                         onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
-                        onNoteReview = { page = Page.NOTE_REVIEW })
-                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, onMode = { wordListMode = it }, onWord = { id, queue ->
+                        onNoteReview = { page = Page.NOTE_REVIEW },
+                        onGoalChange = { newValue, reviewValue ->
+                            newGoal = newValue
+                            reviewGoal = reviewValue
+                            goalPrefs.edit().putInt("new_goal", newValue).putInt("review_goal", reviewValue).apply()
+                        })
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, reviewGoal, newDoneToday, reviewDoneToday, onMode = { wordListMode = it }, onWord = { id, queue ->
                         wordQueue = queue
                         ratedWordIds = emptySet()
                         selectedWordId = id
@@ -170,7 +196,8 @@ private fun Cet6StudyApp() {
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onGoalChange:(Int,Int)->Unit) {
+    var showGoalDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -193,11 +220,14 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
                         StatPill("待复习",due.toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
-                    Row(horizontalArrangement=Arrangement.spacedBy(9.dp)) {
-                        Button(onClick=onReview,enabled=due>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("今日复习 $due",fontWeight=FontWeight.SemiBold) }
-                        Button(onClick=onNewWords,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
+                    DailyGoalProgress("新词", newDone, newGoal, Green)
+                    DailyGoalProgress("复习", reviewDone, reviewGoal, Color(0xFF8C9F63))
+                    Row(horizontalArrangement=Arrangement.spacedBy(9.dp), verticalAlignment=Alignment.CenterVertically) {
+                        Button(onClick=onReview,enabled=due>0 && reviewDone<reviewGoal,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onNewWords,enabled=newDone<newGoal,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.5f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
+                        TextButton(onClick={showGoalDialog=true},contentPadding=PaddingValues(horizontal=4.dp)) { Text("设目标",fontSize=12.sp,color=Green) }
                     }
-                    Text("新词每天最多显示 10 个；例句未齐的词暂不进入背诵",color=Muted,fontSize=12.sp)
+                    Text("未完成的新词留在后续队列；逾期复习继续保留，不会累加成额外惩罚。",color=Muted,fontSize=12.sp)
                 }
             }
         }
@@ -221,6 +251,54 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
             }
         }
     }
+    if(showGoalDialog) DailyGoalDialog(newGoal,reviewGoal,{showGoalDialog=false}) { newValue,reviewValue ->
+        onGoalChange(newValue,reviewValue)
+        showGoalDialog=false
+    }
+}
+
+@Composable
+private fun DailyGoalProgress(label:String,done:Int,goal:Int,color:Color) {
+    Column(verticalArrangement=Arrangement.spacedBy(5.dp)) {
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+            Text("今日$label",fontSize=13.sp,color=DarkGreen,fontWeight=FontWeight.SemiBold)
+            Text("$done / $goal",fontSize=12.sp,color=Muted)
+        }
+        Box(Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha=.75f))) {
+            Box(Modifier.fillMaxWidth(if(goal<=0) 0f else (done.toFloat()/goal).coerceIn(0f,1f)).height(7.dp).clip(RoundedCornerShape(8.dp)).background(color))
+        }
+    }
+}
+
+@Composable
+private fun DailyGoalDialog(newGoal:Int,reviewGoal:Int,onDismiss:()->Unit,onSave:(Int,Int)->Unit) {
+    var newValue by remember(newGoal) { mutableIntStateOf(newGoal) }
+    var reviewValue by remember(reviewGoal) { mutableIntStateOf(reviewGoal) }
+    AlertDialog(
+        onDismissRequest=onDismiss,
+        title={Text("每日单词目标")},
+        text={
+            Column(verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                Text("设置每天计划学习的新词数和复习数。逾期复习保留在队列里，但不会把未完成数量叠加到目标。",fontSize=13.sp,color=Muted,lineHeight=19.sp)
+                GoalStepper("新词",newValue,0,100,{newValue=(newValue-1).coerceAtLeast(0)},{newValue=(newValue+1).coerceAtMost(100)})
+                GoalStepper("复习",reviewValue,0,200,{reviewValue=(reviewValue-1).coerceAtLeast(0)},{reviewValue=(reviewValue+1).coerceAtMost(200)})
+            }
+        },
+        confirmButton={TextButton(onClick={onSave(newValue,reviewValue)}){Text("保存",color=Green)}},
+        dismissButton={TextButton(onClick=onDismiss){Text("取消")}}
+    )
+}
+
+@Composable
+private fun GoalStepper(label:String,value:Int,minimum:Int,maximum:Int,onMinus:()->Unit,onPlus:()->Unit) {
+    Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
+        Text(label,color=Ink,fontWeight=FontWeight.SemiBold)
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            TextButton(onClick=onMinus,enabled=value>minimum){Text("−")}
+            Text("$value 个",modifier=Modifier.widthIn(min=48.dp),color=DarkGreen,fontWeight=FontWeight.Bold)
+            TextButton(onClick=onPlus,enabled=value<maximum){Text("+")}
+        }
+    }
 }
 
 @Composable private fun StatPill(label:String,value:String) { Column(Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha=.58f)).padding(horizontal=13.dp,vertical=9.dp)) { Text(value,color=DarkGreen,fontWeight=FontWeight.Bold,fontSize=18.sp); Text(label,color=Muted,fontSize=11.sp) } }
@@ -237,17 +315,19 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
     var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
-    LaunchedEffect(mode) {
+    LaunchedEffect(mode,newGoal,reviewGoal,newDone,reviewDone) {
         withContext(Dispatchers.IO) {
-            dueIds=dao.dueWordIds(System.currentTimeMillis())
+            val reviewRemaining=(reviewGoal-reviewDone).coerceAtLeast(0)
+            val newRemaining=(newGoal-newDone).coerceAtLeast(0)
+            dueIds=dao.dueWordIds(System.currentTimeMillis()).take(reviewRemaining)
             val seen=dao.studiedWordIds().toSet()
-            newIds=repo.getNewWordIds(10,seen)
+            newIds=repo.getNewWordIds(newRemaining,seen)
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
@@ -277,7 +357,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,onMode:(
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:()->Unit) {
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:(Boolean)->Unit) {
     var detail by remember { mutableStateOf<WordDetail?>(null) }
     var currentStatus by remember { mutableStateOf<UserWordStatus?>(null) }
     var saving by remember { mutableStateOf(false) }
@@ -319,9 +399,9 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
                     Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
+                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
                     }
                     currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                 }
@@ -474,7 +554,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 val blankQuestions=questions.filter{it.evidenceUnitId==sentence.unitId && it.questionNo!=null}
                 val selectedBlank=blankQuestions.firstOrNull{it.unitId==selectedBlankId}
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
-                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed && selectedType!="word_bank"){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                         SelectableReadingText(
@@ -507,7 +587,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                             Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
                             Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                             Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted)
-                        } else Text(if(selectedType=="word_bank") "点击句中空格查看译文、答案和解析；长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
+                        } else Text(if(selectedType=="word_bank") "点击空格查看该空答案；没有空格时点句子或卡片空白处查看译文。长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
                     }
                 }
                 if(revealed || selectedBlank!=null) {
