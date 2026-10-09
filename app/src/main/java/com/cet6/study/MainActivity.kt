@@ -589,7 +589,7 @@ private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingPara
 
 @Composable
 private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit) {
-    SelectableReadingText(value.text,{},selection->onNote(NoteTarget(type,itemId,title,sourceText=selection)))
+    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) })
 }
 
 @Composable
