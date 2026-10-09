@@ -240,7 +240,8 @@ data class UserWordStatus(
     @androidx.room.ColumnInfo(name="next_review") val nextReview: Long,
     @androidx.room.ColumnInfo(name="last_reviewed") val lastReviewed: Long,
     @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int,
-    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0
+    @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0,
+    @androidx.room.ColumnInfo(name="is_mastered", defaultValue = "0") val isMastered: Boolean = false
 )
 
 @Entity(tableName = "user_reading_status", indices = [Index(value = ["paper_id", "reading_type", "passage_no"])])
@@ -285,15 +286,18 @@ data class UserNote(
 @Dao
 interface UserDao {
     @Query("SELECT * FROM user_word_status WHERE word_id=:wordId") suspend fun status(wordId: Int): UserWordStatus?
-    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now ORDER BY next_review") suspend fun dueWordIds(now: Long): List<Int>
+    @Query("SELECT * FROM user_word_status WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review") suspend fun dueWordStatuses(now: Long): List<UserWordStatus>
+    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review") suspend fun dueWordIds(now: Long): List<Int>
     @Query("SELECT word_id FROM user_word_status") suspend fun studiedWordIds(): List<Int>
-    @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now") suspend fun dueCount(now: Long): Int
+    @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now AND is_mastered=0") suspend fun dueCount(now: Long): Int
     @Query("SELECT COUNT(*) FROM user_word_status") suspend fun studiedCount(): Int
     @Query("SELECT * FROM user_reading_status WHERE paper_id=:paperId AND reading_type=:readingType") suspend fun readingStatuses(paperId: String, readingType: String): List<UserReadingStatus>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveReadingStatus(status: UserReadingStatus)
     @Query("SELECT * FROM user_notes WHERE next_review<=:now ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
     @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now") suspend fun dueNoteCount(now: Long): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
+    @Query("UPDATE user_word_status SET is_mastered=:mastered, next_review=:nextReview WHERE word_id=:wordId")
+    suspend fun setWordMastered(wordId: Int, mastered: Boolean, nextReview: Long)
     @Insert suspend fun insertReviewHistory(item: UserReviewHistory)
     @Transaction suspend fun recordReview(status: UserWordStatus, history: UserReviewHistory) {
         saveStatus(status)
@@ -303,7 +307,7 @@ interface UserDao {
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class],version = 4,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class],version = 5,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -354,9 +358,15 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_word_status ADD COLUMN is_mastered INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build().also { instance=it }
         }
     }
