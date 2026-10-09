@@ -3,6 +3,16 @@
 package com.cet6.study
 
 import android.os.Bundle
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -10,6 +20,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,17 +43,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import com.cet6.study.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val AppBg = Color(0xFFF4F8F3)
-private val CardBg = Color(0xFFFFFFFF)
-private val Green = Color(0xFF468A70)
-private val DarkGreen = Color(0xFF245A49)
-private val PaleGreen = Color(0xFFE3F0E8)
-private val PaleYellow = Color(0xFFFFF3D9)
+private val AppBg = Color(0xFFF1F7EC)
+private val CardBg = Color(0xFFFCFDFB)
+private val Green = Color(0xFF52784D)
+private val DarkGreen = Color(0xFF34513A)
+private val PaleGreen = Color(0xFFDCEBD2)
+private val PaleBlue = Color(0xFFE7F1E4)
+private val PaleYellow = Color(0xFFFFF4C9)
 private val Ink = Color(0xFF24352E)
 private val Muted = Color(0xFF78877F)
 
@@ -62,8 +76,14 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, typography = Typography(), content = content)
 }
 
-private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文") }
-private data class NoteTarget(val type: String, val id: Int, val title: String)
+private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习") }
+private enum class WordListMode { NEW, REVIEW, ALL }
+private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "", val storageType: String = type)
+private sealed class ReviewQueueEntry {
+    abstract val dueAt: Long
+    data class Word(val wordId: Int, override val dueAt: Long) : ReviewQueueEntry()
+    data class Note(val note: UserNote) : ReviewQueueEntry() { override val dueAt: Long get() = note.nextReview }
+}
 
 @Composable
 private fun Cet6StudyApp() {
@@ -72,25 +92,46 @@ private fun Cet6StudyApp() {
     val userDb = remember { UserDatabase.get(context) }
     val dao = userDb.dao()
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     var page by remember { mutableStateOf(Page.HOME) }
     var selectedWordId by remember { mutableStateOf<Int?>(null) }
+    var wordQueue by remember { mutableStateOf(emptyList<Int>()) }
+    var ratedWordIds by remember { mutableStateOf(emptySet<Int>()) }
+    var wordListMode by remember { mutableStateOf(WordListMode.NEW) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
+    var dueNotes by remember { mutableIntStateOf(0) }
+    val goalPrefs = remember { context.getSharedPreferences("daily_word_goals", android.content.Context.MODE_PRIVATE) }
+    val todayKey = java.time.LocalDate.now().toString()
+    var newGoal by remember { mutableIntStateOf(goalPrefs.getInt("new_goal", 10).coerceIn(0, 100)) }
+    var reviewGoal by remember { mutableIntStateOf(goalPrefs.getInt("review_goal", 20).coerceIn(0, 200)) }
+    var newDoneToday by remember { mutableIntStateOf(0) }
+    var reviewDoneToday by remember { mutableIntStateOf(0) }
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
+
+    LaunchedEffect(todayKey) {
+        if (goalPrefs.getString("progress_date", null) != todayKey) {
+            goalPrefs.edit().putString("progress_date", todayKey).putInt("new_done", 0).putInt("review_done", 0).apply()
+        }
+        newDoneToday = goalPrefs.getInt("new_done", 0)
+        reviewDoneToday = goalPrefs.getInt("review_done", 0)
+    }
 
     suspend fun refreshCounts() {
         val counts = withContext(Dispatchers.IO) { dao.studiedCount() to dao.dueCount(System.currentTimeMillis()) }
         studied = counts.first
         due = counts.second
+        dueNotes = withContext(Dispatchers.IO) { dao.dueNoteCount(System.currentTimeMillis()) }
     }
     LaunchedEffect(Unit) { refreshCounts() }
 
     Scaffold(
         containerColor = AppBg,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (selectedWordId == null && noteTarget == null) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
+            if (selectedWordId == null && noteTarget == null && page != Page.NOTE_REVIEW) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
                     Triple(Page.HOME, Icons.Outlined.Home, "首页"),
                     Triple(Page.WORDS, Icons.Outlined.BookmarkBorder, "单词"),
@@ -106,21 +147,71 @@ private fun Cet6StudyApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
-                noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null })
+                noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null; scope.launch { refreshCounts() } })
+                page == Page.NOTE_REVIEW -> DailyReviewScreen(
+                    repo = repo,
+                    dao = dao,
+                    dailyLimit = (reviewGoal - reviewDoneToday).coerceAtLeast(0),
+                    snackbarHostState = snackbarHostState,
+                    onBack = { page = Page.HOME; scope.launch { refreshCounts() } },
+                    onReviewDone = {
+                        reviewDoneToday += 1
+                        goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        scope.launch { refreshCounts() }
+                    },
+                    onReviewUndo = {
+                        reviewDoneToday = (reviewDoneToday - 1).coerceAtLeast(0)
+                        goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        scope.launch { refreshCounts() }
+                    }
+                )
                 selectedWordId != null -> WordDetailScreen(
                     wordId = selectedWordId!!,
+                    progress = (wordQueue.indexOf(selectedWordId!!) + 1).coerceAtLeast(1) to wordQueue.size,
                     repo = repo,
                     dao = dao,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
-                    onRated = { selectedWordId = null; scope.launch { refreshCounts() } }
+                    onRated = { wasNew ->
+                        if (wasNew) {
+                            newDoneToday += 1
+                            goalPrefs.edit().putInt("new_done", newDoneToday).apply()
+                        } else {
+                            reviewDoneToday += 1
+                            goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
+                        }
+                        val currentId = selectedWordId
+                        if (currentId != null) {
+                            val completedIds = ratedWordIds + currentId
+                            ratedWordIds = completedIds
+                            val nextId = wordQueue.dropWhile { it != currentId }
+                                .drop(1)
+                                .firstOrNull { it !in completedIds }
+                            selectedWordId = nextId
+                        }
+                        scope.launch { refreshCounts() }
+                    }
                 )
                 else -> when(page) {
-                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due,
-                        onWords = { page = Page.WORDS }, onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
-                    Page.WORDS -> WordListScreen(repo, dao, onWord = { selectedWordId = it })
-                    Page.READING -> ReadingScreen(repo)
+                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, reviewGoal, newDoneToday, reviewDoneToday,
+                        onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
+                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.NOTE_REVIEW },
+                        onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
+                        onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
+                        onNoteReview = { page = Page.NOTE_REVIEW },
+                        onGoalChange = { newValue, reviewValue ->
+                            newGoal = newValue
+                            reviewGoal = reviewValue
+                            goalPrefs.edit().putInt("new_goal", newValue).putInt("review_goal", reviewValue).apply()
+                        })
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, reviewGoal, newDoneToday, reviewDoneToday, onMode = { wordListMode = it }, onWord = { id, queue ->
+                        wordQueue = queue
+                        ratedWordIds = emptySet()
+                        selectedWordId = id
+                    })
+                    Page.READING -> ReadingScreen(repo, dao, onNote = { noteTarget = it })
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
                     Page.WRITING -> WritingScreen(repo, onNote = { noteTarget = it })
+                    Page.NOTE_REVIEW -> Unit
                 }
             }
         }
@@ -128,7 +219,8 @@ private fun Cet6StudyApp() {
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onGoalChange:(Int,Int)->Unit) {
+    var showGoalDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -142,17 +234,23 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onW
             }
         }
         item {
-            Card(Modifier.fillMaxWidth().clickable(onClick=onWords),colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(24.dp)) {
+            Card(Modifier.fillMaxWidth().clickable(onClick=onWords),colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(24.dp)) {
                 Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
-                        Column { Text("今日学习",color=Color.White.copy(alpha=.78f),fontSize=13.sp); Text("词汇复习",color=Color.White,fontSize=21.sp,fontWeight=FontWeight.Bold) }
-                        Icon(Icons.Outlined.CheckCircle,null,tint=Color.White.copy(alpha=.85f),modifier=Modifier.size(27.dp))
+                        Column { Text("今日学习",color=Muted,fontSize=13.sp); Text("词汇学习",color=DarkGreen,fontSize=21.sp,fontWeight=FontWeight.Bold) }
+                        Icon(Icons.Outlined.CheckCircle,null,tint=Green,modifier=Modifier.size(27.dp))
                     }
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                        StatPill("待复习",due.toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
+                        StatPill("待复习",(due+dueNotes).toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
-                    Button(onClick=onWords,colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFDDEDE2),contentColor=DarkGreen),shape=RoundedCornerShape(14.dp)) { Text("开始今天的学习  →",fontWeight=FontWeight.SemiBold) }
-                    Text("新词每天最多显示 10 个；例句未齐的词暂不进入背诵",color=Color.White.copy(alpha=.72f),fontSize=12.sp)
+                    DailyGoalProgress("新词", newDone, newGoal, Green)
+                    DailyGoalProgress("复习", reviewDone, reviewGoal, Color(0xFF8C9F63))
+                    Row(horizontalArrangement=Arrangement.spacedBy(9.dp), verticalAlignment=Alignment.CenterVertically) {
+                        Button(onClick=onReview,enabled=(due+dueNotes)>0 && reviewDone<reviewGoal,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习 ${minOf(due+dueNotes,(reviewGoal-reviewDone).coerceAtLeast(0))}",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onNewWords,enabled=newDone<newGoal,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.5f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
+                        TextButton(onClick={showGoalDialog=true},contentPadding=PaddingValues(horizontal=4.dp)) { Text("设目标",fontSize=12.sp,color=Green) }
+                    }
+                    Text("未完成的新词留在后续队列；逾期复习继续保留，不会累加成额外惩罚。",color=Muted,fontSize=12.sp)
                 }
             }
         }
@@ -164,6 +262,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onW
             }
         }
         item { ModuleCard("作文积累","题目、范文与个人笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onWriting) }
+        item { ModuleCard("今日复习","单词 $due · 笔记 $dueNotes",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
         item {
             Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp)) {
@@ -175,9 +274,57 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,onW
             }
         }
     }
+    if(showGoalDialog) DailyGoalDialog(newGoal,reviewGoal,{showGoalDialog=false}) { newValue,reviewValue ->
+        onGoalChange(newValue,reviewValue)
+        showGoalDialog=false
+    }
 }
 
-@Composable private fun StatPill(label:String,value:String) { Column(Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha=.12f)).padding(horizontal=13.dp,vertical=9.dp)) { Text(value,color=Color.White,fontWeight=FontWeight.Bold,fontSize=18.sp); Text(label,color=Color.White.copy(alpha=.75f),fontSize=11.sp) } }
+@Composable
+private fun DailyGoalProgress(label:String,done:Int,goal:Int,color:Color) {
+    Column(verticalArrangement=Arrangement.spacedBy(5.dp)) {
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+            Text("今日$label",fontSize=13.sp,color=DarkGreen,fontWeight=FontWeight.SemiBold)
+            Text("$done / $goal",fontSize=12.sp,color=Muted)
+        }
+        Box(Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha=.75f))) {
+            Box(Modifier.fillMaxWidth(if(goal<=0) 0f else (done.toFloat()/goal).coerceIn(0f,1f)).height(7.dp).clip(RoundedCornerShape(8.dp)).background(color))
+        }
+    }
+}
+
+@Composable
+private fun DailyGoalDialog(newGoal:Int,reviewGoal:Int,onDismiss:()->Unit,onSave:(Int,Int)->Unit) {
+    var newValue by remember(newGoal) { mutableIntStateOf(newGoal) }
+    var reviewValue by remember(reviewGoal) { mutableIntStateOf(reviewGoal) }
+    AlertDialog(
+        onDismissRequest=onDismiss,
+        title={Text("每日单词目标")},
+        text={
+            Column(verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                Text("设置每天计划学习的新词数和复习数。逾期复习保留在队列里，但不会把未完成数量叠加到目标。",fontSize=13.sp,color=Muted,lineHeight=19.sp)
+                GoalStepper("新词",newValue,0,100,{newValue=(newValue-1).coerceAtLeast(0)},{newValue=(newValue+1).coerceAtMost(100)})
+                GoalStepper("复习",reviewValue,0,200,{reviewValue=(reviewValue-1).coerceAtLeast(0)},{reviewValue=(reviewValue+1).coerceAtMost(200)})
+            }
+        },
+        confirmButton={TextButton(onClick={onSave(newValue,reviewValue)}){Text("保存",color=Green)}},
+        dismissButton={TextButton(onClick=onDismiss){Text("取消")}}
+    )
+}
+
+@Composable
+private fun GoalStepper(label:String,value:Int,minimum:Int,maximum:Int,onMinus:()->Unit,onPlus:()->Unit) {
+    Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
+        Text(label,color=Ink,fontWeight=FontWeight.SemiBold)
+        Row(verticalAlignment=Alignment.CenterVertically) {
+            TextButton(onClick=onMinus,enabled=value>minimum){Text("−")}
+            Text("$value 个",modifier=Modifier.widthIn(min=48.dp),color=DarkGreen,fontWeight=FontWeight.Bold)
+            TextButton(onClick=onPlus,enabled=value<maximum){Text("+")}
+        }
+    }
+}
+
+@Composable private fun StatPill(label:String,value:String) { Column(Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha=.58f)).padding(horizontal=13.dp,vertical=9.dp)) { Text(value,color=DarkGreen,fontWeight=FontWeight.Bold,fontSize=18.sp); Text(label,color=Muted,fontSize=11.sp) } }
 
 @Composable
 private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.graphics.vector.ImageVector,modifier:Modifier=Modifier,onClick:()->Unit) {
@@ -191,31 +338,36 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
-    var dailyOnly by remember { mutableStateOf(true) }
-    var dailyIds by remember { mutableStateOf(emptySet<Int>()) }
+    var dueIds by remember { mutableStateOf(emptyList<Int>()) }
+    var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
-    LaunchedEffect(Unit) {
-        dailyIds=withContext(Dispatchers.IO) {
-            val dueIds=dao.dueWordIds(System.currentTimeMillis())
+    LaunchedEffect(mode,newGoal,reviewGoal,newDone,reviewDone) {
+        withContext(Dispatchers.IO) {
+            val reviewRemaining=(reviewGoal-reviewDone).coerceAtLeast(0)
+            val newRemaining=(newGoal-newDone).coerceAtLeast(0)
+            dueIds=dao.dueWordIds(System.currentTimeMillis()).take(reviewRemaining)
             val seen=dao.studiedWordIds().toSet()
-            (dueIds + repo.getNewWordIds(10,seen)).toSet()
+            newIds=repo.getNewWordIds(newRemaining,seen)
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("单词", "按最终背诵顺序浏览，例句不足的词会标出")
         OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
         Row(Modifier.padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected=dailyOnly,onClick={dailyOnly=true},label={Text("今日计划 ${dailyIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=!dailyOnly,onClick={dailyOnly=false},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.REVIEW,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
+            FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
         }
-        val visibleWords=if(dailyOnly && search.isBlank()) words.filter{it.wordId in dailyIds && it.exampleCount>=3} else words
+        val plannedIds=when(mode){WordListMode.NEW->newIds;WordListMode.REVIEW->dueIds;WordListMode.ALL->emptyList()}
+        val wordsById=words.associateBy { it.wordId }
+        val visibleWords=if(mode!=WordListMode.ALL) plannedIds.mapNotNull { wordsById[it] }.filter { it.exampleCount>=3 } else words
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            if(visibleWords.isEmpty()) item { Text(if(dailyOnly && search.isBlank()) "今天的计划已完成。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
+            if(visibleWords.isEmpty()) item { Text(if(mode!=WordListMode.ALL && search.isBlank()) if(mode==WordListMode.REVIEW) "当前没有到期复习的单词。" else "新词已学完。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
             items(visibleWords,key={it.wordId}) { word ->
-                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
                         Text(word.rank.toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
                         Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
@@ -228,25 +380,33 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,onWord:(Int)->Unit) {
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:()->Unit) {
-    var detail by remember { mutableStateOf<WordDetail?>(null) }
-    var currentStatus by remember { mutableStateOf<UserWordStatus?>(null) }
-    var saving by remember { mutableStateOf(false) }
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null) {
+    var detail by remember(wordId) { mutableStateOf<WordDetail?>(null) }
+    var currentStatus by remember(wordId) { mutableStateOf<UserWordStatus?>(null) }
+    var saving by remember(wordId) { mutableStateOf(false) }
+    var revealed by remember(wordId) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     LaunchedEffect(wordId) { withContext(Dispatchers.IO) { detail=repo.getWord(wordId); currentStatus=dao.status(wordId) } }
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(title={Text("单词详情")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+        TopAppBar(
+            title={Text("单词详情")},
+            navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},
+            actions={ if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text("彻底熟悉",color=Green)} },
+            colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg)
+        )
         val w=detail
         if(w==null) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Green)} else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp),contentPadding=PaddingValues(bottom=28.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 item {
-                    Card(colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(20.dp)) {
-                        Text("第 ${w.rank} 位 · ${w.level}",color=Color.White.copy(alpha=.75f),fontSize=12.sp)
-                        Text(w.lemma,color=Color.White,fontSize=30.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=5.dp))
-                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Color.White.copy(alpha=.78f),fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
+                    Text("${if(progress.second>0) "${progress.first} / ${progress.second} · " else ""}${if(currentStatus==null) "新词学习" else "今日复习"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=4.dp))
+                    Card(Modifier.fillMaxWidth().clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Text("第 ${w.rank} 位 · ${w.level}",color=Muted,fontSize=12.sp)
+                        Text(w.lemma,color=DarkGreen,fontSize=36.sp,fontWeight=FontWeight.Bold)
+                        Text("真题出现 ${w.totalCount} 次 · 覆盖 ${w.paperCount} 套",color=Muted,fontSize=13.sp)
+                        Text(if(revealed) "释义与例句" else "先想想它的意思 · 点卡片揭晓",color=Green,fontSize=13.sp,modifier=Modifier.padding(top=5.dp))
                     } }
                 }
-                items(w.senses,key={it.senseId}) { sense ->
+                if(revealed) items(w.senses,key={it.senseId}) { sense ->
                     Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
                             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){Text(sense.pos,color=Green,fontSize=12.sp,fontWeight=FontWeight.Bold);Text(sense.meaning,color=Ink,fontSize=17.sp,fontWeight=FontWeight.SemiBold)}
@@ -262,15 +422,20 @@ private fun WordDetailScreen(wordId:Int,repo:ContentDb,dao:UserDao,onBack:()->Un
                         }
                     }
                 }
-                item {
+                if(revealed) item {
                     if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
-                    Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=16.sp,color=Ink)
-                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("了解",w.wordId,dao,scope,{saving=true},onRated) }
-                        ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true},onRated) }
+                    Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
+                    Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    if(currentStatus?.isMastered==true) {
+                        Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
+                    } else {
+                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                        }
+                        currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                     }
-                    currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                 }
             }
         }
@@ -281,7 +446,135 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
     onStart()
     scope.launch(Dispatchers.IO) {
         val old=dao.status(wordId)
-        dao.saveStatus(UserWordStatus(wordId,value,nextReviewMillis(value),System.currentTimeMillis(),(old?.reviewCount ?: 0)+1))
+        val now=System.currentTimeMillis()
+        val stageBefore=old?.reviewStage ?: -1
+        val schedule=scheduleNextReview(value,stageBefore,now)
+        dao.recordReview(
+            UserWordStatus(wordId,value,schedule.nextReviewMillis,now,(old?.reviewCount ?: 0)+1,schedule.stage),
+            UserReviewHistory(wordId=wordId,reviewedAt=now,familiarity=value,stageBefore=stageBefore,stageAfter=schedule.stage,intervalDays=schedule.intervalDays)
+        )
+        withContext(Dispatchers.Main) { onComplete() }
+    }
+}
+
+@Composable
+private fun DailyReviewScreen(
+    repo:ContentDb,
+    dao:UserDao,
+    dailyLimit:Int,
+    snackbarHostState:SnackbarHostState,
+    onBack:()->Unit,
+    onReviewDone:()->Unit,
+    onReviewUndo:()->Unit
+) {
+    var entries by remember { mutableStateOf(emptyList<ReviewQueueEntry>()) }
+    var loading by remember { mutableStateOf(true) }
+    var index by remember { mutableIntStateOf(0) }
+    var completedCount by remember { mutableIntStateOf(0) }
+    val scope=rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        entries=withContext(Dispatchers.IO) {
+            val now=System.currentTimeMillis()
+            val words=dao.dueWordStatuses(now).map { ReviewQueueEntry.Word(it.wordId,it.nextReview) }
+            val notes=dao.dueNotes(now).map { ReviewQueueEntry.Note(it) }
+            (words+notes).sortedBy { it.dueAt }.take(dailyLimit)
+        }
+        loading=false
+    }
+
+    val current=entries.getOrNull(index)
+    when {
+        loading -> Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Green) }
+        current==null -> Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
+                Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                    Text(if(dailyLimit<=0) "今日复习目标已完成" else "当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                    Text("未完成的到期内容会继续保留在队列里。",color=Muted)
+                    Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")}
+                }
+            }
+        }
+        current is ReviewQueueEntry.Word -> WordDetailScreen(
+            wordId=current.wordId,
+            progress=(completedCount+1) to (completedCount+entries.size),
+            repo=repo,
+            dao=dao,
+            onBack=onBack,
+            onRated={
+                onReviewDone()
+                completedCount+=1
+                entries=entries.toMutableList().apply { removeAt(index) }
+            },
+            onMastered={
+                val masteredEntry=current
+                scope.launch {
+                    withContext(Dispatchers.IO) { dao.setWordMastered(masteredEntry.wordId,true,Long.MAX_VALUE) }
+                    onReviewDone()
+                    completedCount+=1
+                    entries=entries.toMutableList().apply { removeAt(index) }
+                    val result=snackbarHostState.showSnackbar(
+                        message="已标记为彻底熟悉",
+                        actionLabel="撤销",
+                        withDismissAction=true,
+                        duration=SnackbarDuration.Short
+                    )
+                    if(result==SnackbarResult.ActionPerformed) {
+                        withContext(Dispatchers.IO) { dao.setWordMastered(masteredEntry.wordId,false,System.currentTimeMillis()) }
+                        onReviewUndo()
+                        completedCount=(completedCount-1).coerceAtLeast(0)
+                        entries=entries.toMutableList().apply { add(index.coerceIn(0,size),masteredEntry.copy(dueAt=System.currentTimeMillis())) }
+                    }
+                }
+            }
+        )
+        current is ReviewQueueEntry.Note -> ReviewNoteCard(
+            note=current.note,
+            progress=(completedCount+1) to (completedCount+entries.size),
+            dao=dao,
+            onBack=onBack,
+            onComplete={
+                onReviewDone()
+                completedCount+=1
+                entries=entries.toMutableList().apply { removeAt(index) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBack:()->Unit,onComplete:()->Unit) {
+    var revealed by remember(note.noteId) { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    val scope=rememberCoroutineScope()
+    Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+        TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
+        Text("${progress.first} / ${progress.second} · 笔记",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=10.dp,bottom=10.dp))
+        Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(24.dp)) {
+            Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                Text(if(revealed) note.content else "点卡片空白处查看笔记",fontSize=15.sp,lineHeight=24.sp,color=Ink)
+            }
+        }
+        if(revealed) {
+            Text("这次记得怎么样？",fontSize=14.sp,color=Muted,modifier=Modifier.padding(top=16.dp,bottom=8.dp))
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                ReviewButton("不会",Modifier.weight(1f),saving){ saveNoteRating("不会",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+                ReviewButton("有点了解",Modifier.weight(1f),saving){ saveNoteRating("有点了解",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+                ReviewButton("熟悉",Modifier.weight(1f),saving){ saveNoteRating("熟悉",note,dao,scope,{saving=true}){saving=false;onComplete()} }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+}
+
+private fun saveNoteRating(value:String,note:UserNote,dao:UserDao,scope:kotlinx.coroutines.CoroutineScope,onStart:()->Unit,onComplete:()->Unit) {
+    onStart()
+    scope.launch(Dispatchers.IO) {
+        val now=System.currentTimeMillis()
+        val schedule=scheduleNextReview(value,note.reviewStage,now)
+        dao.saveNote(note.copy(familiarity=value,reviewStage=schedule.stage,nextReview=schedule.nextReviewMillis,lastReviewed=now,reviewCount=note.reviewCount+1,updatedAt=now))
         withContext(Dispatchers.Main) { onComplete() }
     }
 }
@@ -291,48 +584,257 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
 }
 
 @Composable
-private fun ReadingScreen(repo:ContentDb) {
+private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     var selectedId by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("") }
     var readingTypes by remember { mutableStateOf(emptyList<String>()) }
-    var mode by remember { mutableStateOf("精读") }
     var sentences by remember { mutableStateOf(emptyList<ReadingSentence>()) }
     var questions by remember { mutableStateOf(emptyList<ReadingQuestion>()) }
+    var wordBank by remember { mutableStateOf(emptyList<String>()) }
+    var selectedBlankId by remember { mutableIntStateOf(-1) }
+    var statuses by remember { mutableStateOf(emptyList<UserReadingStatus>()) }
+    var selectedPassage by remember { mutableIntStateOf(1) }
+    var sentenceIndex by remember { mutableIntStateOf(0) }
+    var readerMode by remember { mutableStateOf("逐句精读") }
+    var inReader by remember { mutableStateOf(false) }
+    var revealed by remember(selectedId,selectedType,selectedPassage,sentenceIndex) { mutableStateOf(false) }
+    val scope=rememberCoroutineScope()
     LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")}; if(papers.isNotEmpty()) selectedId=papers.first().paperId }
     LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) { readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}; selectedType=readingTypes.firstOrNull().orEmpty() } }
-    LaunchedEffect(selectedId,selectedType,mode) { if(selectedId.isNotBlank() && selectedType.isNotBlank()) withContext(Dispatchers.IO) { sentences=repo.getReadingSentences(selectedId,selectedType); questions=repo.getQuestions(selectedId,selectedType) } }
-    Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("阅读精读", "逐句查看译文与结构分析，答案按原题关联")
-        PaperSelector(papers,selectedId,{selectedId=it})
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) { listOf("精读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
-        if(mode=="精读") LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            items(sentences,key={it.unitId}) { s ->
-                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    if(s.paragraphNo!=null && selectedType=="matching") Text("第 ${s.paragraphNo} 段",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Green)
-                    Text(s.text,fontSize=15.sp,lineHeight=22.sp,color=Ink)
-                    HorizontalDivider(color=Color(0xFFE8EEE9))
-                    Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
-                    Text("怎么看",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(cleanMarkup(s.analysis).ifBlank{"暂无结构分析"},fontSize=13.sp,lineHeight=19.sp,color=Muted)
-                } }
-            }
-        } else LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            items(questions,key={it.unitId}) { q -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.padding(15.dp),verticalArrangement=Arrangement.spacedBy(7.dp)) {
-                Text(q.questionNo?.let{"第 $it 题"} ?: "题目",color=Green,fontSize=11.sp,fontWeight=FontWeight.Bold)
-                Text(q.text,color=Ink,fontSize=14.sp,lineHeight=20.sp)
-                Text("答案：${q.answer.ifBlank{"待核对"}}${if(q.optionText.isNotBlank()) "  ${q.optionText}" else ""}",color=DarkGreen,fontWeight=FontWeight.SemiBold,fontSize=13.sp)
-                if(q.optionText.isNotBlank()) {
-                    Text("对应选项",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
-                    Text(q.optionText,color=Muted,fontSize=12.sp,lineHeight=18.sp)
-                } else if(q.evidence.isNotBlank()) {
-                    Text("对应段落原文",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
-                    Text(q.evidence,color=Muted,fontSize=12.sp,lineHeight=18.sp)
-                }
-            } } }
+    LaunchedEffect(selectedId,selectedType) {
+        if(selectedId.isNotBlank() && selectedType.isNotBlank()) {
+            val loaded=withContext(Dispatchers.IO) { Triple(repo.getReadingSentences(selectedId,selectedType),repo.getQuestions(selectedId,selectedType),dao.readingStatuses(selectedId,selectedType)) }
+            sentences=loaded.first
+            questions=loaded.second
+            wordBank=if(selectedType=="word_bank") withContext(Dispatchers.IO){repo.getWordBank(selectedId)} else emptyList()
+            statuses=loaded.third
+            selectedBlankId=-1
+            selectedPassage=loaded.first.firstOrNull()?.passageNo ?: 1
+            sentenceIndex=0
         }
     }
+    val passageNos=sentences.mapNotNull{it.passageNo}.distinct().sorted()
+    val passageSentences=sentences.filter{it.passageNo==selectedPassage}
+    val sentence=passageSentences.getOrNull(sentenceIndex)
+    val statusByUnit=statuses.associateBy{it.unitId}
+    val completedPassages=passageNos.count { no ->
+        val rows=sentences.filter{it.passageNo==no}
+        rows.isNotEmpty() && rows.all{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+    }
+    if(!inReader) {
+        Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            ScreenHeading("阅读精读", "逐句精读；长按任意文字范围可记笔记")
+            PaperSelector(papers,selectedId,{selectedId=it})
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
+            Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
+            LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                items(passageNos) { passageNo ->
+                    val rows=sentences.filter{it.passageNo==passageNo}
+                    val done=rows.count{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+                    Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(20.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
+                                Text("${typeLabel(selectedType)} · 第${passageNo}篇",fontWeight=FontWeight.Bold,fontSize=17.sp,color=DarkGreen)
+                                Text("$done / ${rows.size} 句",fontSize=12.sp,color=Muted)
+                            }
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                Button(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text("开始精读") }
+                                OutlinedButton(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="整篇通读";inReader=true},modifier=Modifier.weight(1f),shape=RoundedCornerShape(13.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green),contentPadding=PaddingValues(vertical=10.dp)) { Text("整篇阅读") }
+                            }
+                        }
+                    }
+                }
+                item {
+                    if(selectedType!="word_bank") OutlinedButton(onClick={readerMode="题目答案";inReader=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) { Text("查看本套阅读题目与答案") }
+                }
+            }
+        }
+    } else {
+        Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
+            Row(Modifier.fillMaxWidth().padding(top=4.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically) {
+                TextButton(onClick={inReader=false},contentPadding=PaddingValues(horizontal=4.dp,vertical=6.dp)) { Text("‹ 返回文章",color=Green,fontSize=14.sp) }
+                Spacer(Modifier.width(10.dp))
+                Text(if(readerMode=="题目答案") "阅读题目" else "${typeLabel(selectedType)} · 第${selectedPassage}篇",fontSize=16.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen,maxLines=1)
+            }
+            when(readerMode) {
+            "逐句精读" -> if(sentence!=null) {
+                val status=statusByUnit[sentence.unitId]
+                val blankQuestions=questions.filter{it.evidenceUnitId==sentence.unitId && it.questionNo!=null}
+                val selectedBlank=blankQuestions.firstOrNull{it.unitId==selectedBlankId}
+                Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                        SelectableReadingText(
+                            text=sentence.text,
+                            onBlankClick={number->blankQuestions.firstOrNull{it.questionNo==number}?.let{selectedBlankId=it.unitId}},
+                            onNoteSelection={selection->onNote(NoteTarget("reading",sentence.unitId,"阅读摘录笔记",sourceText=selection))}
+                        )
+                        if(selectedType=="word_bank" && blankQuestions.isNotEmpty()) {
+                            HorizontalDivider(color=PaleGreen)
+                            Text("本篇可选词",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            wordBank.chunked(5).forEach { rowWords ->
+                                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                    rowWords.forEach { word -> Text(word,fontSize=12.sp,maxLines=1,color=Ink,modifier=Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(AppBg).padding(horizontal=7.dp,vertical=8.dp)) }
+                                    repeat(5-rowWords.size){Spacer(Modifier.weight(1f))}
+                                }
+                            }
+                        }
+                        if(selectedType=="word_bank" && selectedBlank!=null) {
+                            HorizontalDivider(color=PaleGreen)
+                            Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                            val chosenWord=selectedBlank.optionText.ifBlank{selectedBlank.answer}
+                            Text("第 ${selectedBlank.questionNo} 空，正确答案：$chosenWord",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                            if(selectedBlank.optionText.isNotBlank() && selectedBlank.answer.isNotBlank() && !selectedBlank.answer.equals(selectedBlank.optionText,true)) Text("答案选项：${selectedBlank.answer}",fontSize=12.sp,color=Muted)
+                            if(selectedBlank.explanation.isNotBlank()) Text("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                            if(sentence.analysis.isNotBlank()) Text("句子分析：${cleanMarkup(sentence.analysis)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                        } else if(revealed) {
+                            HorizontalDivider(color=PaleGreen)
+                            Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                            Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
+                            Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                        } else Text(if(selectedType=="word_bank") "点击空格查看该空答案；没有空格时点句子或卡片空白处查看译文。长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
+                    }
+                }
+                if(revealed || selectedBlank!=null) {
+                    Row(Modifier.fillMaxWidth().padding(top=12.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                        listOf("完全解决","熟悉","还不熟").forEach { rating ->
+                            ReviewButton(rating,Modifier.weight(1f),false) {
+                                scope.launch(Dispatchers.IO) {
+                                    dao.saveReadingStatus(UserReadingStatus(sentence.unitId,selectedId,selectedType,sentence.passageNo ?: selectedPassage,rating))
+                                    val updated=dao.readingStatuses(selectedId,selectedType)
+                                    withContext(Dispatchers.Main) {
+                                        statuses=updated
+                                        if(sentenceIndex<passageSentences.lastIndex) sentenceIndex++
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                    TextButton(onClick={sentenceIndex=(sentenceIndex-1).coerceAtLeast(0)}){Text("上一句",color=Green)}
+                    TextButton(onClick={sentenceIndex=(sentenceIndex+1).coerceAtMost((passageSentences.size-1).coerceAtLeast(0))}){Text("下一句",color=Green)}
+                }
+            } else Text("这篇暂无可显示的句子。",color=Muted,modifier=Modifier.padding(20.dp))
+            "整篇通读" -> if(passageSentences.isNotEmpty()) {
+                val paragraphs=passageSentences.groupIntoReadableParagraphs()
+                Text("整篇阅读 · ${passageSentences.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
+                LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    items(paragraphs) { paragraph -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                        paragraph.paragraphNo?.let { Text("第${it}段",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Green) }
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(paragraph.sentences.joinToString(" "){it.text}),"reading",paragraph.sentences.first().unitId,"阅读篇章笔记",onNote)
+                    }} }
+                }
+                Button(onClick={
+                    scope.launch(Dispatchers.IO) {
+                        passageSentences.forEach { dao.saveReadingStatus(UserReadingStatus(it.unitId,selectedId,selectedType,it.passageNo ?: selectedPassage,"熟悉")) }
+                        val updated=dao.readingStatuses(selectedId,selectedType)
+                        withContext(Dispatchers.Main) { statuses=updated }
+                    }
+                },modifier=Modifier.fillMaxWidth(),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(16.dp)){Text("标记本篇已精读")}
+            }
+            else -> LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+              items(questions,key={it.unitId}) { q -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
+                Text(q.questionNo?.let{"第 $it 题"} ?: "题目",color=Green,fontSize=11.sp,fontWeight=FontWeight.Bold)
+                Text(q.text,color=Ink,fontSize=14.sp,lineHeight=20.sp)
+                if(q.options.isNotEmpty()) {
+                    Text("选项",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
+                    q.options.forEach { option -> Text("${option.label}. ${option.text}",color=if(option.label==q.answer) DarkGreen else Muted,fontSize=13.sp,lineHeight=19.sp,fontWeight=if(option.label==q.answer) FontWeight.SemiBold else FontWeight.Normal) }
+                }
+                Text("正确答案：${q.answer.ifBlank{"待核对"}}${if(q.optionText.isNotBlank()) ". ${q.optionText}" else ""}",color=DarkGreen,fontWeight=FontWeight.SemiBold,fontSize=14.sp)
+                if(q.explanation.isNotBlank()) {
+                    Text("为什么选这个",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
+                    Text(cleanMarkup(q.explanation),color=Muted,fontSize=13.sp,lineHeight=19.sp)
+                }
+                if(q.evidence.isNotBlank()) {
+                    Text("原文依据",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
+                    Text(q.evidence,color=Muted,fontSize=13.sp,lineHeight=19.sp)
+                }
+              } } }
+            }
+            }
+        }
+    }
+}
+
+private data class ReadingParagraph(val paragraphNo:Int?,val sentences:List<ReadingSentence>)
+
+/** Use paragraph numbers from the source data where available. For records without them,
+ * keep each source sentence as its own spaced block instead of flattening the entire essay. */
+private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingParagraph> {
+    val groups=mutableListOf<ReadingParagraph>()
+    for(sentence in this) {
+        val number=sentence.paragraphNo
+        val previous=groups.lastOrNull()
+        if(number!=null && previous?.paragraphNo==number) {
+            groups[groups.lastIndex]=previous.copy(sentences=previous.sentences+sentence)
+        } else groups += ReadingParagraph(number,listOf(sentence))
+    }
+    return groups
+}
+
+@Composable
+private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit) {
+    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end })
+}
+
+@Composable
+private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList()) {
+    val currentBlankClick by rememberUpdatedState(onBlankClick)
+    val currentNoteSelection by rememberUpdatedState(onNoteSelection)
+    val currentText by rememberUpdatedState(text)
+    AndroidView(
+        modifier=Modifier.fillMaxWidth(),
+        factory={context->
+            TextView(context).apply {
+                setTextColor(android.graphics.Color.rgb(36,53,46))
+                textSize=15f
+                setLineSpacing(0f,1.4f)
+                setTextIsSelectable(true)
+                movementMethod=LinkMovementMethod.getInstance()
+                customSelectionActionModeCallback=object:ActionMode.Callback {
+                    override fun onCreateActionMode(mode:ActionMode,menu:Menu):Boolean {
+                        menu.add(Menu.NONE,1,Menu.NONE,"记笔记")
+                        return true
+                    }
+                    override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
+                    override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
+                        if(item.itemId!=1) return false
+                        val selectedText=text?.toString().orEmpty()
+                        val start=minOf(selectionStart,selectionEnd).coerceIn(0,selectedText.length)
+                        val end=maxOf(selectionStart,selectionEnd).coerceIn(start,selectedText.length)
+                        if(end>start) currentNoteSelection(selectedText.substring(start,end))
+                        mode.finish()
+                        return true
+                    }
+                    override fun onDestroyActionMode(mode:ActionMode) {}
+                }
+            }
+        },
+        update={view->
+            val styled=SpannableString(text)
+            highlightRanges.forEach { range ->
+                if(range.first>=0 && range.last+1<=text.length) styled.setSpan(android.text.style.BackgroundColorSpan(android.graphics.Color.rgb(255,244,201)),range.first,range.last+1,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            Regex("_{2,}\\s*(\\d+)\\s*_{2,}").findAll(text).forEach { match->
+                val number=match.groupValues[1].toIntOrNull() ?: return@forEach
+                styled.setSpan(object:ClickableSpan() {
+                    override fun onClick(widget:View) { currentBlankClick(number) }
+                    override fun updateDrawState(ds:TextPaint) {
+                        ds.color=android.graphics.Color.rgb(70,138,112)
+                        ds.isUnderlineText=false
+                        ds.bgColor=android.graphics.Color.rgb(255,243,217)
+                    }
+                },match.range.first,match.range.last+1,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            if(view.text.toString()!=text) view.text=styled
+        }
+    )
 }
 
 private fun typeLabel(type:String)=when(type){"close_reading"->"仔细阅读";"matching"->"长篇匹配";"word_bank"->"选词填空";else->type}
@@ -354,7 +856,7 @@ private fun highlightedText(text:String,json:String):androidx.compose.ui.text.An
         ranges.forEach { (start,end) ->
             if(start<cursor) return@forEach
             append(text.substring(cursor,start))
-            pushStyle(androidx.compose.ui.text.SpanStyle(background=Color(0xFFFFE8A3),fontWeight=FontWeight.SemiBold))
+            pushStyle(androidx.compose.ui.text.SpanStyle(background=PaleYellow,fontWeight=FontWeight.SemiBold))
             append(text.substring(start,end))
             pop()
             cursor=end
@@ -366,20 +868,33 @@ private fun highlightedText(text:String,json:String):androidx.compose.ui.text.An
 @Composable
 private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var rows by remember { mutableStateOf(emptyList<TranslationItem>()) }
+    var index by remember(selectedId) { mutableIntStateOf(0) }
+    var revealed by remember(selectedId,index) { mutableStateOf(false) }
     LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("translation")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
-    LaunchedEffect(selectedId){if(selectedId.isNotBlank())rows=withContext(Dispatchers.IO){repo.getTranslations(selectedId)}}
+    LaunchedEffect(selectedId){if(selectedId.isNotBlank()){rows=withContext(Dispatchers.IO){repo.getTranslations(selectedId)};index=0}}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("翻译训练","先在心里作答，再对照参考译文和优化译文")
+        ScreenHeading("翻译训练","先自己翻译，点卡片后查看参考译文和优化译文")
         PaperSelector(papers,selectedId,{selectedId=it})
-        LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=22.dp),verticalArrangement=Arrangement.spacedBy(11.dp)) {
-            items(rows,key={it.unitId}){item-> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
-                Text("第 ${item.orderNo} 句",fontSize=11.sp,color=Green,fontWeight=FontWeight.Bold)
-                Text(item.chinese,fontSize=15.sp,lineHeight=22.sp,color=Ink)
-                if(item.reference.isBlank() && item.optimized.isBlank()) Text("参考译文正在补入",fontSize=12.sp,color=Muted)
-                if(item.reference.isNotBlank()){Text("参考译文",fontSize=11.sp,color=Green,fontWeight=FontWeight.SemiBold);Text(item.reference,fontSize=13.sp,lineHeight=19.sp,color=Ink)}
-                if(item.optimized.isNotBlank()){Text("优化译文",fontSize=11.sp,color=Green,fontWeight=FontWeight.SemiBold);Text(item.optimized,fontSize=13.sp,lineHeight=19.sp,color=Ink)}
-                TextButton(onClick={onNote(NoteTarget("translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句"))}){Icon(Icons.Outlined.BookmarkBorder,null);Text("添加笔记")}
-            }}}
+        val item=rows.getOrNull(index)
+        if(item!=null) {
+            Text("第 ${index+1} / ${rows.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
+            Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(22.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+                    Text("先在心里翻译",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold)
+                    SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.chinese),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote)
+                    if(revealed) {
+                        HorizontalDivider(color=Color.White.copy(alpha=.8f))
+                        if(item.reference.isNotBlank()) { Text("参考译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.reference),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
+                        if(item.optimized.isNotBlank()) { Text("优化译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.optimized),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
+                        if(item.reference.isBlank()&&item.optimized.isBlank()) Text("参考译文正在补入",fontSize=13.sp,color=Muted)
+                    } else Text("点卡片查看译文",fontSize=13.sp,color=Muted)
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical=12.dp),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
+                TextButton(onClick={index=(index-1).coerceAtLeast(0)}){Text("上一句",color=Green)}
+                if(!revealed) TextButton(onClick={revealed=true}){Text("查看译文",color=Green)}
+                TextButton(onClick={index=(index+1).coerceAtMost(rows.lastIndex)}){Text("下一句",color=Green)}
+            }
         }
     }
 }
@@ -390,17 +905,16 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
     LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("writing")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
     LaunchedEffect(selectedId){if(selectedId.isNotBlank())item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("作文积累","题目与范文整篇展示，选好表达可以记进笔记")
+        ScreenHeading("作文积累","长按选择好词好句，加入可复习的个人笔记")
         PaperSelector(papers,selectedId,{selectedId=it})
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            item { Card(colors=CardDefaults.cardColors(containerColor=DarkGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(18.dp)){Text("写作题目",color=Color.White.copy(alpha=.75f),fontSize=12.sp);Text(current.prompt,color=Color.White,fontSize=15.sp,lineHeight=23.sp,modifier=Modifier.padding(top=7.dp))}} }
+            item { Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold);SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote)}} }
             items(current.samples){sample->
                 val label=if(sample.type=="excellent")"优秀范文" else "参考范文"
-                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
+                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
                     Text(label,color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold)
-                    Text(highlightedText(sample.text,sample.highlightsJson),color=Ink,fontSize=14.sp,lineHeight=22.sp)
-                    TextButton(onClick={onNote(NoteTarget("writing",current.promptUnitId,"作文笔记 · $label"))}){Icon(Icons.Outlined.BookmarkBorder,null);Text("记录好词好句")}
+                    SelectableNoteText(highlightedText(sample.text,sample.highlightsJson),"writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote)
                 }}
             }
             item { if(current.samples.isEmpty()) Text("这套范文正在补入。",color=Muted) }
@@ -410,17 +924,29 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 
 @Composable
 private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
-    var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };val scope=rememberCoroutineScope()
-    LaunchedEffect(target){withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull()?.let{text=it.content};loaded=true}
-    Column(Modifier.fillMaxSize().padding(18.dp)) {
+    var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };var current by remember(target){mutableStateOf<UserNote?>(null)};val scope=rememberCoroutineScope()
+    LaunchedEffect(target){
+        current=withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull{it.sourceText==target.sourceText}
+        text=current?.content.orEmpty()
+        loaded=true
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal=20.dp, vertical=12.dp)) {
         TopAppBar(title={Text("学习笔记")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
-        Text(target.title,fontSize=19.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(vertical=16.dp))
-        OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f),placeholder={Text("记下短语、句式或自己的理解")},shape=RoundedCornerShape(18.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
-        Button(onClick={scope.launch(Dispatchers.IO){dao.saveNote(UserNote(itemType=target.type,itemId=target.id,content=text));saved=true}},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp),shape=RoundedCornerShape(15.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存" else "保存笔记")}
+        Text(target.title,fontSize=22.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(top=18.dp,bottom=12.dp))
+        if(target.sourceText.isNotBlank()) Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) { Text(target.sourceText,fontSize=15.sp,lineHeight=23.sp,color=Ink,modifier=Modifier.fillMaxWidth().padding(17.dp)) }
+        OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f).padding(top=14.dp),placeholder={Text("写下释义、表达用法或自己的理解")},shape=RoundedCornerShape(20.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
+        Button(onClick={scope.launch {
+            val now=System.currentTimeMillis()
+            val old=current
+            val draft=old?.copy(content=text,updatedAt=now) ?: UserNote(itemType=target.type,itemId=target.id,sourceText=target.sourceText,content=text,updatedAt=now,reviewStage=-1,nextReview=now+24L*60L*60L*1000L)
+            val newId=withContext(Dispatchers.IO){dao.saveNote(draft)}
+            current=draft.copy(noteId=newId)
+            saved=true
+        }},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp,bottom=8.dp),shape=RoundedCornerShape(17.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存并加入笔记复习" else "保存笔记")}
     }
 }
 
-@Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=18.dp,bottom=12.dp)){Text(title,fontSize=23.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=3.dp))}}
+@Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=22.dp,bottom=16.dp)){Text(title,fontSize=24.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=14.sp,lineHeight=20.sp,color=Muted,modifier=Modifier.padding(top=6.dp))}}
 
 @Composable
 private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(String)->Unit) {
