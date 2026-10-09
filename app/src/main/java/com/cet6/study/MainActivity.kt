@@ -525,7 +525,11 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 @Composable
 private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
     var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };val scope=rememberCoroutineScope()
-    LaunchedEffect(target){withContext(Dispatchers.IO){dao.notes(target.storageType,target.id)}.firstOrNull()?.let{text=it.content};loaded=true}
+    LaunchedEffect(target){
+        loaded=false;text="";saved=false
+        withContext(Dispatchers.IO){dao.notes(target.storageType,target.id)}.firstOrNull()?.let{text=it.content}
+        loaded=true
+    }
     Column(Modifier.fillMaxSize().padding(18.dp)) {
         TopAppBar(title={Text("学习笔记")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
         Text(target.title,fontSize=19.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(vertical=16.dp))
