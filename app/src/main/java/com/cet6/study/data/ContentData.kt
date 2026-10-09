@@ -146,7 +146,8 @@ class ContentDb private constructor(context: Context) {
     fun getQuestions(paperId: String, readingType: String): List<ReadingQuestion> {
         val actual = readingSource(paperId)
         val sql = """
-            SELECT q.unit_id,q.question_no,q.text,a.answer_label,COALESCE(o.text,''),COALESCE(a.explanation_zh,''),COALESCE(e.text,'')
+            SELECT q.unit_id,q.question_no,q.text,COALESCE(a.answer_label,''),COALESCE(o.text,''),
+                   COALESCE(a.explanation_zh,''),COALESCE(e.text,''),a.evidence_unit_id
             FROM content_units q LEFT JOIN reading_answers a ON a.question_unit_id=q.unit_id
             LEFT JOIN content_units o ON o.unit_id=a.correct_option_unit_id
             LEFT JOIN content_units e ON e.unit_id=a.evidence_unit_id
@@ -154,8 +155,39 @@ class ContentDb private constructor(context: Context) {
             ORDER BY q.order_no,q.question_no,q.unit_id
         """.trimIndent()
         return database.rawQuery(sql, arrayOf(actual, readingType)).use { c ->
-            buildList { while (c.moveToNext()) add(ReadingQuestion(c.getInt(0), if(c.isNull(1)) null else c.getInt(1), c.getString(2), c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "")) }
+            buildList {
+                while (c.moveToNext()) {
+                    val unitId = c.getInt(0)
+                    val options = if (readingType == "close_reading") database.rawQuery(
+                        "SELECT unit_id,option_label,text FROM content_units WHERE parent_unit_id=? AND content_type='option' ORDER BY order_no,unit_id",
+                        arrayOf(unitId.toString())
+                    ).use { optionCursor ->
+                        buildList {
+                            while (optionCursor.moveToNext()) add(ReadingOption(optionCursor.getInt(0), optionCursor.getString(1) ?: "", optionCursor.getString(2) ?: ""))
+                        }
+                    } else emptyList()
+                    add(ReadingQuestion(
+                        unitId = unitId,
+                        questionNo = if (c.isNull(1)) null else c.getInt(1),
+                        text = c.getString(2) ?: "",
+                        answer = c.getString(3) ?: "",
+                        optionText = c.getString(4) ?: "",
+                        explanation = c.getString(5) ?: "",
+                        evidence = c.getString(6) ?: "",
+                        evidenceUnitId = if (c.isNull(7)) null else c.getInt(7),
+                        options = options
+                    ))
+                }
+            }
         }
+    }
+
+    fun getWordBank(paperId: String): List<String> {
+        val actual = readingSource(paperId)
+        return database.rawQuery(
+            "SELECT text FROM content_units WHERE paper_id=? AND module='reading' AND content_type='word_bank' AND reading_type='word_bank' ORDER BY order_no,unit_id",
+            arrayOf(actual)
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getString(0) ?: "") } }
     }
 
     fun getTranslations(paperId: String): List<TranslationItem> = getUnits(paperId, "translation").map { unit ->
@@ -190,7 +222,8 @@ data class WordSense(val senseId: Int,val pos: String,val meaning: String,val pr
 data class WordExample(val english: String,val chinese: String,val source: String)
 data class PaperCard(val paperId: String,val year: Int,val month: Int,val setNo: Int,val readingSourceId: String,val itemCount: Int) { val title get() = "${year}年${month}月 第${setNo}套" }
 data class ReadingSentence(val unitId: Int,val paragraphNo: Int?,val orderNo: Int,val text: String,val translation: String,val analysis: String)
-data class ReadingQuestion(val unitId: Int,val questionNo: Int?,val text: String,val answer: String,val optionText: String,val explanation: String,val evidence: String)
+data class ReadingOption(val unitId: Int,val label: String,val text: String)
+data class ReadingQuestion(val unitId: Int,val questionNo: Int?,val text: String,val answer: String,val optionText: String,val explanation: String,val evidence: String,val evidenceUnitId: Int?,val options: List<ReadingOption> = emptyList())
 data class BasicUnit(val unitId: Int,val orderNo: Int,val text: String)
 data class TranslationItem(val unitId: Int,val orderNo: Int,val chinese: String,val reference: String,val optimized: String)
 data class WritingSample(val type: String,val text: String,val highlightsJson: String)
