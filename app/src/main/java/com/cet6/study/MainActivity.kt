@@ -2,6 +2,16 @@
 
 package com.cet6.study
 
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
+import android.widget.TextView
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -31,6 +41,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import com.cet6.study.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -63,7 +74,13 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
 }
 
 private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文") }
-private data class NoteTarget(val type: String, val id: Int, val title: String)
+private data class NoteTarget(
+    val type: String,
+    val id: Int,
+    val title: String,
+    val selectedText: String? = null,
+    val storageType: String = type
+)
 
 @Composable
 private fun Cet6StudyApp() {
@@ -118,7 +135,7 @@ private fun Cet6StudyApp() {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due,
                         onWords = { page = Page.WORDS }, onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING })
                     Page.WORDS -> WordListScreen(repo, dao, onWord = { selectedWordId = it })
-                    Page.READING -> ReadingScreen(repo)
+                    Page.READING -> ReadingScreen(repo, onNote = { noteTarget = it })
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
                     Page.WRITING -> WritingScreen(repo, onNote = { noteTarget = it })
                 }
@@ -291,7 +308,7 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
 }
 
 @Composable
-private fun ReadingScreen(repo:ContentDb) {
+private fun ReadingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     var selectedId by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("") }
@@ -299,20 +316,63 @@ private fun ReadingScreen(repo:ContentDb) {
     var mode by remember { mutableStateOf("精读") }
     var sentences by remember { mutableStateOf(emptyList<ReadingSentence>()) }
     var questions by remember { mutableStateOf(emptyList<ReadingQuestion>()) }
+    var wordBank by remember { mutableStateOf(emptyList<String>()) }
+    var selectedBlankId by remember { mutableIntStateOf(-1) }
     LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")}; if(papers.isNotEmpty()) selectedId=papers.first().paperId }
     LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) { readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}; selectedType=readingTypes.firstOrNull().orEmpty() } }
-    LaunchedEffect(selectedId,selectedType,mode) { if(selectedId.isNotBlank() && selectedType.isNotBlank()) withContext(Dispatchers.IO) { sentences=repo.getReadingSentences(selectedId,selectedType); questions=repo.getQuestions(selectedId,selectedType) } }
+    LaunchedEffect(selectedId,selectedType,mode) {
+        if(selectedId.isNotBlank() && selectedType.isNotBlank()) withContext(Dispatchers.IO) {
+            sentences=repo.getReadingSentences(selectedId,selectedType)
+            questions=repo.getQuestions(selectedId,selectedType)
+            wordBank=if(selectedType=="word_bank") repo.getWordBank(selectedId) else emptyList()
+        }
+        selectedBlankId=-1
+    }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("阅读精读", "逐句查看译文与结构分析，答案按原题关联")
+        ScreenHeading("阅读精读", "长按任意文字范围可记笔记；选词填空按原文逐句练习")
         PaperSelector(papers,selectedId,{selectedId=it})
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) { listOf("精读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
-        if(mode=="精读") LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
+        if(selectedType!="word_bank") Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) { listOf("精读","题目答案").forEach { FilterChip(selected=mode==it,onClick={mode=it},label={Text(it)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen)) } }
+        if(mode=="精读" || selectedType=="word_bank") LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
             items(sentences,key={it.unitId}) { s ->
+                val blankQuestions=questions.filter { it.evidenceUnitId==s.unitId && it.questionNo!=null }
+                val selectedBlank=blankQuestions.firstOrNull { it.unitId==selectedBlankId }
                 Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                     if(s.paragraphNo!=null && selectedType=="matching") Text("第 ${s.paragraphNo} 段",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Green)
-                    Text(s.text,fontSize=15.sp,lineHeight=22.sp,color=Ink)
+                    SelectableReadingText(
+                        text=s.text,
+                        onBlankClick={number -> blankQuestions.firstOrNull { it.questionNo==number }?.let { selectedBlankId=it.unitId }},
+                        onNoteSelection={selection -> onNote(NoteTarget(
+                            type="reading",id=s.unitId,title="阅读摘录笔记",selectedText=selection,
+                            storageType="reading_selection_${s.unitId}_${selection.hashCode()}"
+                        ))}
+                    )
+                    if(selectedType=="word_bank" && blankQuestions.isNotEmpty()) {
+                        Text("本篇可选词",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green)
+                        wordBank.chunked(5).forEach { rowWords ->
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                rowWords.forEach { word -> Text(word,fontSize=11.sp,maxLines=1,color=Ink,modifier=Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(AppBg).padding(horizontal=7.dp,vertical=8.dp)) }
+                                repeat(5-rowWords.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                        blankQuestions.forEach { q ->
+                            FilterChip(
+                                selected=selectedBlankId==q.unitId,
+                                onClick={selectedBlankId=if(selectedBlankId==q.unitId) -1 else q.unitId},
+                                label={Text("第 ${q.questionNo} 空  ____")},
+                                colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow)
+                            )
+                        }
+                        if(selectedBlank!=null) {
+                            HorizontalDivider(color=Color(0xFFE8EEE9))
+                            Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green)
+                            Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
+                            Text("应选：${selectedBlank.answer}${if(selectedBlank.optionText.isNotBlank()) ". ${selectedBlank.optionText}" else ""}",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                            if(selectedBlank.explanation.isNotBlank()) Text("解析：${cleanMarkup(selectedBlank.explanation)}",fontSize=13.sp,lineHeight=19.sp,color=Muted)
+                            if(s.analysis.isNotBlank()) Text("句子分析：${cleanMarkup(s.analysis)}",fontSize=13.sp,lineHeight=19.sp,color=Muted)
+                        }
+                    }
                     HorizontalDivider(color=Color(0xFFE8EEE9))
                     Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
                     Text("怎么看",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(cleanMarkup(s.analysis).ifBlank{"暂无结构分析"},fontSize=13.sp,lineHeight=19.sp,color=Muted)
@@ -322,20 +382,74 @@ private fun ReadingScreen(repo:ContentDb) {
             items(questions,key={it.unitId}) { q -> Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(17.dp)) { Column(Modifier.padding(15.dp),verticalArrangement=Arrangement.spacedBy(7.dp)) {
                 Text(q.questionNo?.let{"第 $it 题"} ?: "题目",color=Green,fontSize=11.sp,fontWeight=FontWeight.Bold)
                 Text(q.text,color=Ink,fontSize=14.sp,lineHeight=20.sp)
-                Text("答案：${q.answer.ifBlank{"待核对"}}${if(q.optionText.isNotBlank()) "  ${q.optionText}" else ""}",color=DarkGreen,fontWeight=FontWeight.SemiBold,fontSize=13.sp)
-                if(q.optionText.isNotBlank()) {
-                    Text("对应选项",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
-                    Text(q.optionText,color=Muted,fontSize=12.sp,lineHeight=18.sp)
-                } else if(q.evidence.isNotBlank()) {
-                    Text("对应段落原文",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
-                    Text(q.evidence,color=Muted,fontSize=12.sp,lineHeight=18.sp)
+                if(q.options.isNotEmpty()) {
+                    Text("选项",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold)
+                    q.options.forEach { option -> Text("${option.label}. ${option.text}",color=if(option.label==q.answer) DarkGreen else Muted,fontSize=12.sp,lineHeight=18.sp,fontWeight=if(option.label==q.answer) FontWeight.SemiBold else FontWeight.Normal) }
                 }
+                Text("正确答案：${q.answer.ifBlank{"待核对"}}${if(q.optionText.isNotBlank()) ". ${q.optionText}" else ""}",color=DarkGreen,fontWeight=FontWeight.SemiBold,fontSize=13.sp)
+                if(q.explanation.isNotBlank()) { Text("为什么选这个",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold);Text(cleanMarkup(q.explanation),color=Muted,fontSize=12.sp,lineHeight=18.sp) }
+                if(q.evidence.isNotBlank()) { Text("原文依据",color=Green,fontSize=11.sp,fontWeight=FontWeight.SemiBold);Text(q.evidence,color=Muted,fontSize=12.sp,lineHeight=18.sp) }
             } } }
         }
     }
 }
 
-private fun typeLabel(type:String)=when(type){"close_reading"->"仔细阅读";"matching"->"长篇匹配";"word_bank"->"选词填空";else->type}
+private fun typeLabel(type:String)=when(type){"close_reading"->"仔细阅读";"matching"->"长篇匹配";"word_bank"->"选词填空精读";else->type}
+
+@Composable
+private fun SelectableReadingText(
+    text:String,
+    onBlankClick:(Int)->Unit,
+    onNoteSelection:(String)->Unit
+) {
+    val currentBlankClick by rememberUpdatedState(onBlankClick)
+    val currentNoteSelection by rememberUpdatedState(onNoteSelection)
+    val currentText by rememberUpdatedState(text)
+    AndroidView(
+        modifier=Modifier.fillMaxWidth(),
+        factory={ context ->
+            TextView(context).apply {
+                setTextColor(android.graphics.Color.rgb(36,53,46))
+                textSize=15f
+                setLineSpacing(0f,1.4f)
+                textIsSelectable=true
+                movementMethod=LinkMovementMethod.getInstance()
+                customSelectionActionModeCallback=object:ActionMode.Callback {
+                    override fun onCreateActionMode(mode:ActionMode,menu:Menu):Boolean {
+                        menu.add(Menu.NONE,1,Menu.NONE,"记笔记")
+                        return true
+                    }
+                    override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
+                    override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
+                        if(item.itemId!=1) return false
+                        val start=selectionStart.coerceAtLeast(0)
+                        val end=selectionEnd.coerceAtLeast(start)
+                        if(end>start) currentNoteSelection.value=currentText.value.subSequence(start,end).toString()
+                        mode.finish()
+                        return true
+                    }
+                    override fun onDestroyActionMode(mode:ActionMode) {}
+                }
+            }
+        },
+        update={ view ->
+            val styled=SpannableString(text)
+            Regex("_{2,}\\s*(\\d+)\\s*_{2,}").findAll(text).forEach { match ->
+                val number=match.groupValues[1].toIntOrNull() ?: return@forEach
+                styled.setSpan(object:ClickableSpan() {
+                    override fun onClick(widget:View) { currentBlankClick.value(number) }
+                    override fun updateDrawState(ds:TextPaint) {
+                        ds.color=android.graphics.Color.rgb(70,138,112)
+                        ds.isUnderlineText=false
+                        ds.bgColor=android.graphics.Color.rgb(255,243,217)
+                    }
+                },match.range.first,match.range.last+1,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            if(view.text.toString()!=text) view.text=styled
+        }
+    )
+}
+
 private fun cleanMarkup(text:String)=text.replace("`","")
 
 private fun highlightedText(text:String,json:String):androidx.compose.ui.text.AnnotatedString {
@@ -411,12 +525,20 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 @Composable
 private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
     var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };val scope=rememberCoroutineScope()
-    LaunchedEffect(target){withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull()?.let{text=it.content};loaded=true}
+    LaunchedEffect(target){withContext(Dispatchers.IO){dao.notes(target.storageType,target.id)}.firstOrNull()?.let{text=it.content};loaded=true}
     Column(Modifier.fillMaxSize().padding(18.dp)) {
         TopAppBar(title={Text("学习笔记")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
         Text(target.title,fontSize=19.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(vertical=16.dp))
+        target.selectedText?.let { quote ->
+            Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(14.dp),modifier=Modifier.fillMaxWidth().padding(bottom=12.dp)) {
+                Column(Modifier.padding(13.dp),verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                    Text("选中的原文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                    Text(quote,fontSize=13.sp,lineHeight=19.sp,color=Ink)
+                }
+            }
+        }
         OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f),placeholder={Text("记下短语、句式或自己的理解")},shape=RoundedCornerShape(18.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
-        Button(onClick={scope.launch(Dispatchers.IO){dao.saveNote(UserNote(itemType=target.type,itemId=target.id,content=text));saved=true}},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp),shape=RoundedCornerShape(15.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存" else "保存笔记")}
+        Button(onClick={scope.launch(Dispatchers.IO){dao.saveNote(UserNote(itemType=target.storageType,itemId=target.id,content=text));saved=true}},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp),shape=RoundedCornerShape(15.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存" else "保存笔记")}
     }
 }
 
