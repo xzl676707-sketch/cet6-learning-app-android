@@ -105,8 +105,7 @@ private fun Cet6StudyApp() {
     val goalPrefs = remember { context.getSharedPreferences("daily_word_goals", android.content.Context.MODE_PRIVATE) }
     val todayKey = java.time.LocalDate.now().toString()
     var newGoal by remember { mutableIntStateOf(goalPrefs.getInt("new_goal", 10).coerceIn(0, 100)) }
-    var reviewGoal by remember { mutableIntStateOf(goalPrefs.getInt("review_goal", 20).coerceIn(0, 200)) }
-    var newDoneToday by remember { mutableIntStateOf(0) }
+        var newDoneToday by remember { mutableIntStateOf(0) }
     var reviewDoneToday by remember { mutableIntStateOf(0) }
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
@@ -151,8 +150,7 @@ private fun Cet6StudyApp() {
                 page == Page.NOTE_REVIEW -> DailyReviewScreen(
                     repo = repo,
                     dao = dao,
-                    dailyLimit = (reviewGoal - reviewDoneToday).coerceAtLeast(0),
-                    snackbarHostState = snackbarHostState,
+                                        snackbarHostState = snackbarHostState,
                     onBack = { page = Page.HOME; scope.launch { refreshCounts() } },
                     onReviewDone = {
                         reviewDoneToday += 1
@@ -192,25 +190,24 @@ private fun Cet6StudyApp() {
                     }
                 )
                 else -> when(page) {
-                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, reviewGoal, newDoneToday, reviewDoneToday,
+                    Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, newDoneToday, reviewDoneToday,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
                         onReview = { wordListMode = WordListMode.REVIEW; page = Page.NOTE_REVIEW },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
                         onNoteReview = { page = Page.NOTE_REVIEW },
-                        onGoalChange = { newValue, reviewValue ->
+                        onGoalChange = { newValue ->
                             newGoal = newValue
-                            reviewGoal = reviewValue
-                            goalPrefs.edit().putInt("new_goal", newValue).putInt("review_goal", reviewValue).apply()
+                            goalPrefs.edit().putInt("new_goal", newValue).apply()
                         })
-                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, reviewGoal, newDoneToday, reviewDoneToday, onMode = { wordListMode = it }, onWord = { id, queue ->
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, onMode = { wordListMode = it }, onWord = { id, queue ->
                         wordQueue = queue
                         ratedWordIds = emptySet()
                         selectedWordId = id
                     })
                     Page.READING -> ReadingScreen(repo, dao, onNote = { noteTarget = it })
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
-                    Page.WRITING -> WritingScreen(repo, onNote = { noteTarget = it })
+                    Page.WRITING -> WritingScreen(repo, dao, onNote = { noteTarget = it })
                     Page.NOTE_REVIEW -> Unit
                 }
             }
@@ -219,7 +216,7 @@ private fun Cet6StudyApp() {
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onGoalChange:(Int,Int)->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onGoalChange:(Int)->Unit) {
     var showGoalDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
@@ -244,13 +241,13 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
                         StatPill("待复习",(due+dueNotes).toString()); StatPill("已学词",studied.toString()); StatPill("可背新词",readyWords.toString())
                     }
                     DailyGoalProgress("新词", newDone, newGoal, Green)
-                    DailyGoalProgress("复习", reviewDone, reviewGoal, Color(0xFF8C9F63))
+                    DailyGoalProgress("复习", reviewDone, reviewDone + due + dueNotes, Color(0xFF8C9F63))
                     Row(horizontalArrangement=Arrangement.spacedBy(9.dp), verticalAlignment=Alignment.CenterVertically) {
-                        Button(onClick=onReview,enabled=(due+dueNotes)>0 && reviewDone<reviewGoal,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习 ${minOf(due+dueNotes,(reviewGoal-reviewDone).coerceAtLeast(0))}",fontWeight=FontWeight.SemiBold) }
+                        Button(onClick=onReview,enabled=(due+dueNotes)>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习 ${due+dueNotes}",fontWeight=FontWeight.SemiBold) }
                         Button(onClick=onNewWords,enabled=newDone<newGoal,colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.5f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
                         TextButton(onClick={showGoalDialog=true},contentPadding=PaddingValues(horizontal=4.dp)) { Text("设目标",fontSize=12.sp,color=Green) }
                     }
-                    Text("未完成的新词留在后续队列；逾期复习继续保留，不会累加成额外惩罚。",color=Muted,fontSize=12.sp)
+                    Text("新词按每日目标安排；复习数量由间隔周期和今天实际到期的词、笔记决定。",color=Muted,fontSize=12.sp)
                 }
             }
         }
@@ -274,8 +271,8 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
             }
         }
     }
-    if(showGoalDialog) DailyGoalDialog(newGoal,reviewGoal,{showGoalDialog=false}) { newValue,reviewValue ->
-        onGoalChange(newValue,reviewValue)
+    if(showGoalDialog) DailyGoalDialog(newGoal,{showGoalDialog=false}) { newValue ->
+        onGoalChange(newValue)
         showGoalDialog=false
     }
 }
@@ -294,20 +291,18 @@ private fun DailyGoalProgress(label:String,done:Int,goal:Int,color:Color) {
 }
 
 @Composable
-private fun DailyGoalDialog(newGoal:Int,reviewGoal:Int,onDismiss:()->Unit,onSave:(Int,Int)->Unit) {
+private fun DailyGoalDialog(newGoal:Int,onDismiss:()->Unit,onSave:(Int)->Unit) {
     var newValue by remember(newGoal) { mutableIntStateOf(newGoal) }
-    var reviewValue by remember(reviewGoal) { mutableIntStateOf(reviewGoal) }
     AlertDialog(
         onDismissRequest=onDismiss,
         title={Text("每日单词目标")},
         text={
             Column(verticalArrangement=Arrangement.spacedBy(14.dp)) {
-                Text("设置每天计划学习的新词数和复习数。逾期复习保留在队列里，但不会把未完成数量叠加到目标。",fontSize=13.sp,color=Muted,lineHeight=19.sp)
+                Text("设置每天计划学习的新词数。复习数量按间隔周期自动安排，到期内容会全部进入今日队列。",fontSize=13.sp,color=Muted,lineHeight=19.sp)
                 GoalStepper("新词",newValue,0,100,{newValue=(newValue-1).coerceAtLeast(0)},{newValue=(newValue+1).coerceAtMost(100)})
-                GoalStepper("复习",reviewValue,0,200,{reviewValue=(reviewValue-1).coerceAtLeast(0)},{reviewValue=(reviewValue+1).coerceAtMost(200)})
             }
         },
-        confirmButton={TextButton(onClick={onSave(newValue,reviewValue)}){Text("保存",color=Green)}},
+        confirmButton={TextButton(onClick={onSave(newValue)}){Text("保存",color=Green)}},
         dismissButton={TextButton(onClick=onDismiss){Text("取消")}}
     )
 }
@@ -338,17 +333,16 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,reviewGoal:Int,newDone:Int,reviewDone:Int,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
     var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
-    LaunchedEffect(mode,newGoal,reviewGoal,newDone,reviewDone) {
+    LaunchedEffect(mode,newGoal,newDone) {
         withContext(Dispatchers.IO) {
-            val reviewRemaining=(reviewGoal-reviewDone).coerceAtLeast(0)
             val newRemaining=(newGoal-newDone).coerceAtLeast(0)
-            dueIds=dao.dueWordIds(System.currentTimeMillis()).take(reviewRemaining)
+            dueIds=dao.dueWordIds(System.currentTimeMillis())
             val seen=dao.studiedWordIds().toSet()
             newIds=repo.getNewWordIds(newRemaining,seen)
         }
@@ -461,7 +455,6 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
 private fun DailyReviewScreen(
     repo:ContentDb,
     dao:UserDao,
-    dailyLimit:Int,
     snackbarHostState:SnackbarHostState,
     onBack:()->Unit,
     onReviewDone:()->Unit,
@@ -478,7 +471,7 @@ private fun DailyReviewScreen(
             val now=System.currentTimeMillis()
             val words=dao.dueWordStatuses(now).map { ReviewQueueEntry.Word(it.wordId,it.nextReview) }
             val notes=dao.dueNotes(now).map { ReviewQueueEntry.Note(it) }
-            (words+notes).sortedBy { it.dueAt }.take(dailyLimit)
+            (words+notes).sortedBy { it.dueAt }
         }
         loading=false
     }
@@ -490,7 +483,7 @@ private fun DailyReviewScreen(
             TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
             Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
                 Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text(if(dailyLimit<=0) "今日复习目标已完成" else "当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                    Text("当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
                     Text("未完成的到期内容会继续保留在队列里。",color=Muted)
                     Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")}
                 }
@@ -779,15 +772,17 @@ private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingPara
 }
 
 @Composable
-private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit) {
-    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end })
+private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit,userHighlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null) {
+    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end } + userHighlightRanges, onHighlightSelection)
 }
 
 @Composable
-private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList()) {
+private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null) {
     val currentBlankClick by rememberUpdatedState(onBlankClick)
     val currentNoteSelection by rememberUpdatedState(onNoteSelection)
+    val currentHighlightSelection by rememberUpdatedState(onHighlightSelection)
     val currentText by rememberUpdatedState(text)
+    val styleKey = text to highlightRanges
     AndroidView(
         modifier=Modifier.fillMaxWidth(),
         factory={context->
@@ -800,15 +795,19 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
                 customSelectionActionModeCallback=object:ActionMode.Callback {
                     override fun onCreateActionMode(mode:ActionMode,menu:Menu):Boolean {
                         menu.add(Menu.NONE,1,Menu.NONE,"记笔记")
+                        if(currentHighlightSelection.value!=null) menu.add(Menu.NONE,2,Menu.NONE,"标黄")
                         return true
                     }
                     override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
                     override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
-                        if(item.itemId!=1) return false
+                        if(item.itemId!=1 && item.itemId!=2) return false
                         val selectedText=text?.toString().orEmpty()
                         val start=minOf(selectionStart,selectionEnd).coerceIn(0,selectedText.length)
                         val end=maxOf(selectionStart,selectionEnd).coerceIn(start,selectedText.length)
-                        if(end>start) currentNoteSelection(selectedText.substring(start,end))
+                        if(end>start) {
+                            if(item.itemId==1) currentNoteSelection(selectedText.substring(start,end))
+                            else currentHighlightSelection.value?.invoke(start,end)
+                        }
                         mode.finish()
                         return true
                     }
@@ -832,7 +831,10 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
                     }
                 },match.range.first,match.range.last+1,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
-            if(view.text.toString()!=text) view.text=styled
+            if(view.text.toString()!=text || view.tag!=styleKey) {
+                view.text=styled
+                view.tag=styleKey
+            }
         }
     )
 }
@@ -900,10 +902,16 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 }
 
 @Composable
-private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
+private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var item by remember { mutableStateOf<WritingItem?>(null) }
+    var userHighlights by remember { mutableStateOf<Map<Long,List<UserWritingHighlight>>>(emptyMap()) }
+    val scope=rememberCoroutineScope()
     LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("writing")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
     LaunchedEffect(selectedId){if(selectedId.isNotBlank())item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}}
+    LaunchedEffect(item?.samples) {
+        val samples=item?.samples.orEmpty()
+        userHighlights=withContext(Dispatchers.IO) { samples.associate { sample -> sample.sampleId to dao.writingHighlights(sample.sampleId) } }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("作文积累","长按选择好词好句，加入可复习的个人笔记")
         PaperSelector(papers,selectedId,{selectedId=it})
@@ -914,7 +922,20 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
                 val label=if(sample.type=="excellent")"优秀范文" else "参考范文"
                 Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
                     Text(label,color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold)
-                    SelectableNoteText(highlightedText(sample.text,sample.highlightsJson),"writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote)
+                    SelectableNoteText(
+                        highlightedText(sample.text,sample.highlightsJson),"writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote,
+                        userHighlightRanges=userHighlights[sample.sampleId].orEmpty().map { it.startOffset until it.endOffset },
+                        onHighlightSelection={start,end->
+                            if(start>=0 && end>start && end<=sample.text.length) {
+                                val selected=sample.text.substring(start,end)
+                                val highlight=UserWritingHighlight(sampleId=sample.sampleId,startOffset=start,endOffset=end,selectedText=selected)
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { dao.saveWritingHighlight(highlight) }
+                                    userHighlights=userHighlights + (sample.sampleId to (userHighlights[sample.sampleId].orEmpty() + highlight))
+                                }
+                            }
+                        }
+                    )
                 }}
             }
             item { if(current.samples.isEmpty()) Text("这套范文正在补入。",color=Muted) }
