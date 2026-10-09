@@ -780,7 +780,7 @@ private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,ty
 private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null) {
     val currentBlankClick by rememberUpdatedState(onBlankClick)
     val currentNoteSelection by rememberUpdatedState(onNoteSelection)
-    val currentHighlightSelection by rememberUpdatedState(onHighlightSelection)
+    val currentHighlightSelection = rememberUpdatedState(onHighlightSelection)
     val currentText by rememberUpdatedState(text)
     val styleKey = text to highlightRanges
     AndroidView(
@@ -842,14 +842,25 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
 private fun typeLabel(type:String)=when(type){"close_reading"->"仔细阅读";"matching"->"长篇匹配";"word_bank"->"选词填空";else->type}
 private fun cleanMarkup(text:String)=text.replace("`","")
 
-private fun highlightedText(text:String,json:String):androidx.compose.ui.text.AnnotatedString {
+private fun highlightedText(text:String,json:String,sourceText:String=text):androidx.compose.ui.text.AnnotatedString {
     val ranges=runCatching {
         val array=org.json.JSONArray(json)
         buildList {
             for(i in 0 until array.length()) {
                 val obj=array.optJSONObject(i) ?: continue
                 val start=obj.optInt("start",-1); val end=obj.optInt("end",-1)
-                if(start>=0 && end>start && end<=text.length) add(start to end)
+                if(start<0 || end<=start || end>sourceText.length) continue
+                if(text==sourceText) {
+                    if(end<=text.length) add(start to end)
+                } else {
+                    val selected=sourceText.substring(start,end)
+                    val candidates=generateSequence(text.indexOf(selected)) { previous ->
+                        val next=text.indexOf(selected,previous+1)
+                        if(next>=0) next else null
+                    }.toList()
+                    val mapped=candidates.minByOrNull { kotlin.math.abs(it-start) }
+                    if(mapped!=null) add(mapped to (mapped+selected.length))
+                }
             }
         }.sortedBy{it.first}
     }.getOrDefault(emptyList())
@@ -903,46 +914,141 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 
 @Composable
 private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) {
-    var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var item by remember { mutableStateOf<WritingItem?>(null) }
+    var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
+    var selectedId by remember { mutableStateOf("") }
+    var item by remember { mutableStateOf<WritingItem?>(null) }
     var userHighlights by remember { mutableStateOf<Map<Long,List<UserWritingHighlight>>>(emptyMap()) }
+    var userTextOverrides by remember { mutableStateOf<Map<Long,String>>(emptyMap()) }
+    var editingSampleId by remember { mutableStateOf<Long?>(null) }
+    var editingText by remember { mutableStateOf("") }
     val scope=rememberCoroutineScope()
-    LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("writing")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
-    LaunchedEffect(selectedId){if(selectedId.isNotBlank())item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}}
+
+    LaunchedEffect(Unit) {
+        papers=withContext(Dispatchers.IO){repo.getPapers("writing")}
+        if(papers.isNotEmpty()) selectedId=papers.first().paperId
+    }
+    LaunchedEffect(selectedId) {
+        if(selectedId.isNotBlank()) item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}
+    }
     LaunchedEffect(item?.samples) {
         val samples=item?.samples.orEmpty()
-        userHighlights=withContext(Dispatchers.IO) { samples.associate { sample -> sample.sampleId to dao.writingHighlights(sample.sampleId) } }
+        val loaded=withContext(Dispatchers.IO) {
+            samples.associate { sample ->
+                sample.sampleId to (dao.writingText(sample.sampleId)?.textOverride ?: sample.text)
+            }
+        }
+        userTextOverrides=loaded
+        userHighlights=withContext(Dispatchers.IO) {
+            samples.associate { sample -> sample.sampleId to dao.writingHighlights(sample.sampleId) }
+        }
     }
+
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
-        ScreenHeading("作文积累","长按选择好词好句，加入可复习的个人笔记")
+        ScreenHeading("作文积累","长按选择好词好句，可记笔记或标黄；点“编辑换行”可自行调整段落")
         PaperSelector(papers,selectedId,{selectedId=it})
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            item { Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold);SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote)}} }
-            items(current.samples){sample->
-                val label=if(sample.type=="excellent")"优秀范文" else "参考范文"
-                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
-                    Text(label,color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold)
-                    SelectableNoteText(
-                        highlightedText(sample.text,sample.highlightsJson),"writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote,
-                        userHighlightRanges=userHighlights[sample.sampleId].orEmpty().map { it.startOffset until it.endOffset },
-                        onHighlightSelection={start,end->
-                            if(start>=0 && end>start && end<=sample.text.length) {
-                                val selected=sample.text.substring(start,end)
-                                val highlight=UserWritingHighlight(sampleId=sample.sampleId,startOffset=start,endOffset=end,selectedText=selected)
-                                scope.launch {
-                                    withContext(Dispatchers.IO) { dao.saveWritingHighlight(highlight) }
-                                    userHighlights=userHighlights + (sample.sampleId to (userHighlights[sample.sampleId].orEmpty() + highlight))
+            item {
+                Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)) {
+                    Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold)
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote)
+                    }
+                }
+            }
+            items(current.samples) { sample ->
+                val label=if(sample.type=="excellent") "优秀范文" else "参考范文"
+                val displayText=userTextOverrides[sample.sampleId] ?: sample.text
+                val savedHighlights=userHighlights[sample.sampleId].orEmpty()
+                val userRanges=resolveUserHighlightRanges(displayText,savedHighlights)
+                Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)) {
+                    Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)) {
+                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
+                            Text(label,color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold)
+                            TextButton(onClick={
+                                editingSampleId=sample.sampleId
+                                editingText=displayText
+                            }) { Text("编辑换行",color=Green) }
+                        }
+                        SelectableNoteText(
+                            highlightedText(displayText,sample.highlightsJson,sample.text),
+                            "writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote,
+                            userHighlightRanges=userRanges,
+                            onHighlightSelection={start,end ->
+                                if(start>=0 && end>start && end<=displayText.length) {
+                                    val selected=displayText.substring(start,end)
+                                    val highlight=UserWritingHighlight(
+                                        sampleId=sample.sampleId,
+                                        startOffset=start,
+                                        endOffset=end,
+                                        selectedText=selected
+                                    )
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { dao.saveWritingHighlight(highlight) }
+                                        userHighlights=userHighlights + (sample.sampleId to (savedHighlights + highlight))
+                                    }
                                 }
                             }
-                        }
-                    )
-                }}
+                        )
+                    }
+                }
             }
             item { if(current.samples.isEmpty()) Text("这套范文正在补入。",color=Muted) }
         }
     }
+
+    val sampleId=editingSampleId
+    if(sampleId!=null) {
+        AlertDialog(
+            onDismissRequest={editingSampleId=null},
+            title={Text("调整范文分段")},
+            text={
+                Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    Text("可以直接在段落之间按回车换行。保存后只调整本机显示，不修改原始范文库。",fontSize=13.sp,color=Muted,lineHeight=19.sp)
+                    OutlinedTextField(
+                        value=editingText,
+                        onValueChange={editingText=it},
+                        modifier=Modifier.fillMaxWidth().heightIn(min=180.dp,max=360.dp),
+                        minLines=8,
+                        maxLines=18,
+                        shape=RoundedCornerShape(14.dp),
+                        colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green)
+                    )
+                }
+            },
+            confirmButton={
+                TextButton(onClick={
+                    val textToSave=editingText
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            dao.saveWritingText(UserWritingText(sampleId=sampleId,textOverride=textToSave))
+                        }
+                        userTextOverrides=userTextOverrides + (sampleId to textToSave)
+                        editingSampleId=null
+                    }
+                }) { Text("保存",color=Green) }
+            },
+            dismissButton={TextButton(onClick={editingSampleId=null}){Text("取消")}}
+        )
+    }
 }
 
+private fun resolveUserHighlightRanges(text:String,highlights:List<UserWritingHighlight>):List<IntRange> =
+    highlights.mapNotNull { highlight ->
+        val selected=highlight.selectedText
+        if(selected.isEmpty()) return@mapNotNull null
+        val storedStart=highlight.startOffset
+        val directMatches=storedStart>=0 && storedStart+selected.length<=text.length &&
+            text.substring(storedStart,storedStart+selected.length)==selected
+        val start=if(directMatches) storedStart else {
+            val candidates=generateSequence(text.indexOf(selected)) { previous ->
+                val next=text.indexOf(selected,previous+1)
+                if(next>=0) next else null
+            }.toList()
+            candidates.minByOrNull { kotlin.math.abs(it-storedStart) } ?: -1
+        }
+        if(start>=0) start until (start+selected.length) else null
+    }
 @Composable
 private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
     var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };var current by remember(target){mutableStateOf<UserNote?>(null)};val scope=rememberCoroutineScope()
