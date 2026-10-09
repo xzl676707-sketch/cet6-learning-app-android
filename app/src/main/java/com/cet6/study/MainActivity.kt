@@ -457,7 +457,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                     }
                 }
                 item {
-                    OutlinedButton(onClick={readerMode="题目答案";inReader=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) { Text("查看本套阅读题目与答案") }
+                    if(selectedType!="word_bank") OutlinedButton(onClick={readerMode="题目答案";inReader=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) { Text("查看本套阅读题目与答案") }
                 }
             }
         }
@@ -474,7 +474,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 val blankQuestions=questions.filter{it.evidenceUnitId==sentence.unitId && it.questionNo!=null}
                 val selectedBlank=blankQuestions.firstOrNull{it.unitId==selectedBlankId}
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
-                Card(Modifier.fillMaxWidth().weight(1f),colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed && selectedType!="word_bank"){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                         SelectableReadingText(
@@ -496,7 +496,9 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                             HorizontalDivider(color=PaleGreen)
                             Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                             Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
-                            Text("应选：第 ${selectedBlank.questionNo} 空 · ${selectedBlank.answer}${if(selectedBlank.optionText.isNotBlank()) " · ${selectedBlank.optionText}" else ""}",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                            val chosenWord=selectedBlank.optionText.ifBlank{selectedBlank.answer}
+                            Text("第 ${selectedBlank.questionNo} 空，正确答案：$chosenWord",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                            if(selectedBlank.optionText.isNotBlank() && selectedBlank.answer.isNotBlank() && !selectedBlank.answer.equals(selectedBlank.optionText,true)) Text("答案选项：${selectedBlank.answer}",fontSize=12.sp,color=Muted)
                             if(selectedBlank.explanation.isNotBlank()) Text("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
                             if(sentence.analysis.isNotBlank()) Text("句子分析：${cleanMarkup(sentence.analysis)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
                         } else if(revealed) {
@@ -505,10 +507,9 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                             Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
                             Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                             Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted)
-                        } else Text("点“查看译文”看解析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
+                        } else Text(if(selectedType=="word_bank") "点击句中空格查看译文、答案和解析；长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
                     }
                 }
-                if(!revealed && selectedBlank==null) TextButton(onClick={revealed=true},modifier=Modifier.align(Alignment.End)){Text("查看译文",color=Green)}
                 if(revealed || selectedBlank!=null) {
                     Row(Modifier.fillMaxWidth().padding(top=12.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                         listOf("完全解决","熟悉","还不熟").forEach { rating ->
@@ -589,11 +590,11 @@ private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingPara
 
 @Composable
 private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit) {
-    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) })
+    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end })
 }
 
 @Composable
-private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit) {
+private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList()) {
     val currentBlankClick by rememberUpdatedState(onBlankClick)
     val currentNoteSelection by rememberUpdatedState(onNoteSelection)
     val currentText by rememberUpdatedState(text)
@@ -626,6 +627,9 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
         },
         update={view->
             val styled=SpannableString(text)
+            highlightRanges.forEach { range ->
+                if(range.first>=0 && range.last+1<=text.length) styled.setSpan(android.text.style.BackgroundColorSpan(android.graphics.Color.rgb(255,244,201)),range.first,range.last+1,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
             Regex("_{2,}\\s*(\\d+)\\s*_{2,}").findAll(text).forEach { match->
                 val number=match.groupValues[1].toIntOrNull() ?: return@forEach
                 styled.setSpan(object:ClickableSpan() {
@@ -686,7 +690,7 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
             Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(22.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                     Text("先在心里翻译",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold)
-                    Text(item.chinese,fontSize=19.sp,lineHeight=31.sp,color=DarkGreen,fontWeight=FontWeight.Medium)
+                    SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.chinese),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote)
                     if(revealed) {
                         HorizontalDivider(color=Color.White.copy(alpha=.8f))
                         if(item.reference.isNotBlank()) { Text("参考译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.reference),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
@@ -714,7 +718,7 @@ private fun WritingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
         PaperSelector(papers,selectedId,{selectedId=it})
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            item { Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold);Text(current.prompt,color=DarkGreen,fontSize=16.sp,lineHeight=25.sp)}} }
+            item { Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold);SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote)}} }
             items(current.samples){sample->
                 val label=if(sample.type=="excellent")"优秀范文" else "参考范文"
                 Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(22.dp)){Column(Modifier.padding(21.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
