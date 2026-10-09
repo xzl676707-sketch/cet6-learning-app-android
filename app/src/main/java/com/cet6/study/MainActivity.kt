@@ -373,9 +373,11 @@ private fun ReadingScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
                             if(s.analysis.isNotBlank()) Text("句子分析：${cleanMarkup(s.analysis)}",fontSize=13.sp,lineHeight=19.sp,color=Muted)
                         }
                     }
-                    HorizontalDivider(color=Color(0xFFE8EEE9))
-                    Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
-                    Text("怎么看",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(cleanMarkup(s.analysis).ifBlank{"暂无结构分析"},fontSize=13.sp,lineHeight=19.sp,color=Muted)
+                    if(selectedType!="word_bank" || selectedBlank==null) {
+                        HorizontalDivider(color=Color(0xFFE8EEE9))
+                        Text("译文",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(s.translation.ifBlank{"暂无译文"},fontSize=13.sp,lineHeight=19.sp,color=Ink)
+                        Text("怎么看",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Green);Text(cleanMarkup(s.analysis).ifBlank{"暂无结构分析"},fontSize=13.sp,lineHeight=19.sp,color=Muted)
+                    }
                 } }
             }
         } else LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
