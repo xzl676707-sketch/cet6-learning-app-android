@@ -293,6 +293,13 @@ data class UserWritingHighlight(
     @androidx.room.ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "user_writing_texts")
+data class UserWritingText(
+    @PrimaryKey @androidx.room.ColumnInfo(name = "sample_id") val sampleId: Long,
+    @androidx.room.ColumnInfo(name = "text_override") val textOverride: String,
+    @androidx.room.ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
+)
+
 @Dao
 interface UserDao {
     @Query("SELECT * FROM user_word_status WHERE word_id=:wordId") suspend fun status(wordId: Int): UserWordStatus?
@@ -305,6 +312,8 @@ interface UserDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveReadingStatus(status: UserReadingStatus)
     @Query("SELECT * FROM user_writing_highlights WHERE sample_id=:sampleId ORDER BY start_offset,end_offset") suspend fun writingHighlights(sampleId: Long): List<UserWritingHighlight>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingHighlight(highlight: UserWritingHighlight)
+    @Query("SELECT * FROM user_writing_texts WHERE sample_id=:sampleId") suspend fun writingText(sampleId: Long): UserWritingText?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingText(text: UserWritingText)
     @Query("SELECT * FROM user_notes WHERE next_review<=:now ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
     @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now") suspend fun dueNoteCount(now: Long): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
@@ -319,7 +328,7 @@ interface UserDao {
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class],version = 6,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class],version = 7,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -392,9 +401,21 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_writing_texts (
+                        sample_id INTEGER NOT NULL PRIMARY KEY,
+                        text_override TEXT NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build().also { instance=it }
         }
     }
