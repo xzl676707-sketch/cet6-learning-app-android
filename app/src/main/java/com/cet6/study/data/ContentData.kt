@@ -78,16 +78,34 @@ class ContentDb private constructor(context: Context) {
     }
 
     fun getNewWordIds(limit: Int, excluded: Set<Int>): List<Int> {
-        val rows = database.rawQuery("""
-            SELECT w.word_id FROM words w
-            JOIN word_senses s ON s.word_id=w.word_id
-            JOIN word_examples e ON e.sense_id=s.sense_id AND e.is_default=1
-            GROUP BY w.word_id,w.rank_no HAVING COUNT(e.example_link_id)>=3
-            ORDER BY w.rank_no LIMIT ?
-        """.trimIndent(), arrayOf((limit + excluded.size).toString())).use { c ->
+        if (limit <= 0) return emptyList()
+        val rows = database.rawQuery(
+            "SELECT word_id FROM words ORDER BY rank_no,word_id LIMIT ?",
+            arrayOf((limit + excluded.size).toString())
+        ).use { c ->
             buildList { while (c.moveToNext()) { val id = c.getInt(0); if (id !in excluded && size < limit) add(id) } }
         }
         return rows
+    }
+
+    fun getWordFormSources(): List<WordFormSource> {
+        val sql = """
+            SELECT w.word_id,w.rank_no,w.lemma,w.frequency_level,w.total_count,w.paper_count,
+                   COALESCE(GROUP_CONCAT(DISTINCT s.meaning_zh), '') AS meanings,
+                   (SELECT COUNT(*) FROM word_examples e JOIN word_senses sx ON sx.sense_id=e.sense_id
+                    WHERE sx.word_id=w.word_id AND e.is_default=1) AS example_count,
+                   COALESCE(GROUP_CONCAT(DISTINCT s.pos), '') AS parts_of_speech
+            FROM words w LEFT JOIN word_senses s ON s.word_id=w.word_id
+            GROUP BY w.word_id ORDER BY w.rank_no,w.word_id
+        """.trimIndent()
+        return database.rawQuery(sql, emptyArray()).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    val card=WordCard(c.getInt(0),c.getInt(1),c.getString(2),c.getString(3),c.getInt(4),c.getInt(5),c.getString(6),c.getInt(7))
+                    add(WordFormSource(card,c.getString(8) ?: ""))
+                }
+            }
+        }
     }
 
     fun getWord(wordId: Int): WordDetail? {
@@ -221,6 +239,7 @@ class ContentDb private constructor(context: Context) {
 }
 
 data class WordCard(val wordId: Int,val rank: Int,val lemma: String,val level: String,val totalCount: Int,val paperCount: Int,val meanings: String,val exampleCount: Int)
+data class WordFormSource(val word: WordCard,val partsOfSpeech: String)
 data class WordDetail(val wordId: Int,val rank: Int,val lemma: String,val level: String,val totalCount: Int,val paperCount: Int,val senses: List<WordSense>)
 data class WordSense(val senseId: Int,val pos: String,val meaning: String,val priority: Int,val examples: List<WordExample> = emptyList())
 data class WordExample(val english: String,val chinese: String,val source: String)
