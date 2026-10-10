@@ -107,6 +107,35 @@ private fun Cet6StudyApp() {
     var newGoal by remember { mutableIntStateOf(goalPrefs.getInt("new_goal", 10).coerceIn(0, 100)) }
     var todayAddedWordIds by remember { mutableStateOf(emptySet<Int>()) }
     var newDoneToday by remember { mutableIntStateOf(0) }
+    var sharedLookupWord by remember { mutableStateOf<WordDetail?>(null) }
+    var sharedLookupChoices by remember { mutableStateOf(emptyList<WordCard>()) }
+    var sharedWordFormIndex by remember { mutableStateOf<Map<String,List<WordCard>>?>(null) }
+    fun lookupSelectedText(selection:String) {
+        val term=Regex("[A-Za-z]+(?:['-][A-Za-z]+)*").find(selection)?.value?.lowercase()
+        if(term.isNullOrBlank()) {
+            scope.launch { snackbarHostState.showSnackbar("无：2500 词库中没有这个词") }
+            return
+        }
+        scope.launch {
+            val index=sharedWordFormIndex ?: withContext(Dispatchers.IO) {
+                buildWordFormIndex(repo.getWordFormSources())
+            }.also { sharedWordFormIndex=it }
+            val allMatches=index[term].orEmpty()
+            val exact=allMatches.firstOrNull { it.lemma.equals(term,ignoreCase=true) }
+            val matches=if(exact!=null) listOf(exact) else allMatches
+            when(matches.size) {
+                0 -> snackbarHostState.showSnackbar("无：2500 词库中没有这个词")
+                1 -> {
+                    sharedLookupChoices=emptyList()
+                    sharedLookupWord=withContext(Dispatchers.IO) { repo.getWord(matches.first().wordId) }
+                }
+                else -> {
+                    sharedLookupWord=null
+                    sharedLookupChoices=matches
+                }
+            }
+        }
+    }
     var reviewDoneToday by remember { mutableIntStateOf(0) }
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
@@ -154,6 +183,7 @@ private fun Cet6StudyApp() {
                     repo = repo,
                     dao = dao,
                                         snackbarHostState = snackbarHostState,
+                    onWordLookup = ::lookupSelectedText,
                     onBack = { page = Page.HOME; scope.launch { refreshCounts() } },
                     onReviewDone = {
                         reviewDoneToday += 1
@@ -171,6 +201,7 @@ private fun Cet6StudyApp() {
                     progress = (wordQueue.indexOf(selectedWordId!!) + 1).coerceAtLeast(1) to wordQueue.size,
                     repo = repo,
                     dao = dao,
+                    onWordLookup = ::lookupSelectedText,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
                     onRated = { wasNew ->
                         if (wasNew) {
@@ -226,10 +257,53 @@ private fun Cet6StudyApp() {
                             }
                         }
                     )
-                    Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
-                    Page.WRITING -> WritingScreen(repo, dao, onNote = { noteTarget = it })
+                    Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it }, onWordLookup = ::lookupSelectedText)
+                    Page.WRITING -> WritingScreen(repo, dao, onNote = { noteTarget = it }, onWordLookup = ::lookupSelectedText)
                     Page.NOTE_REVIEW -> Unit
                 }
+            }
+            if(sharedLookupChoices.isNotEmpty()) AlertDialog(
+                onDismissRequest={sharedLookupChoices=emptyList()},
+                title={Text("找到多个词条，请选择",color=DarkGreen)},
+                text={
+                    Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                        sharedLookupChoices.forEach { choice ->
+                            TextButton(onClick={
+                                sharedLookupChoices=emptyList()
+                                scope.launch { sharedLookupWord=withContext(Dispatchers.IO){repo.getWord(choice.wordId)} }
+                            },modifier=Modifier.fillMaxWidth()) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    Text(choice.lemma,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                                    Text(choice.meanings.replace(",","；"),fontSize=12.sp,color=Muted)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton={TextButton(onClick={sharedLookupChoices=emptyList()}){Text("关闭",color=Green)}}
+            )
+            sharedLookupWord?.let { word ->
+                AlertDialog(
+                    onDismissRequest={sharedLookupWord=null},
+                    title={Text("${word.lemma} · 第${word.rank}位",color=DarkGreen)},
+                    text={
+                        Column(Modifier.heightIn(max=430.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                            Text("${word.level} · 真题出现 ${word.totalCount} 次 · 覆盖 ${word.paperCount} 套",fontSize=12.sp,color=Muted)
+                            word.senses.forEach { sense ->
+                                Text("${sense.pos}  ${sense.meaning}",fontSize=15.sp,fontWeight=FontWeight.SemiBold,color=Ink)
+                                if(sense.examples.isEmpty()) Text("暂无默认例句",fontSize=12.sp,color=Muted)
+                                sense.examples.forEach { example ->
+                                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(AppBg).padding(9.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
+                                        Text(example.english,fontSize=13.sp,lineHeight=18.sp,color=Ink)
+                                        if(example.chinese.isNotBlank()) Text(example.chinese,fontSize=11.sp,lineHeight=16.sp,color=Muted)
+                                    }
+                                }
+                            }
+                            if(word.senses.isEmpty()) Text("暂无词义数据",fontSize=12.sp,color=Muted)
+                        }
+                    },
+                    confirmButton={TextButton(onClick={sharedLookupWord=null}){Text("关闭",color=Green)}}
+                )
             }
         }
     }
@@ -396,7 +470,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null) {
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onWordLookup:(String)->Unit = {},onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null) {
     var detail by remember(wordId) { mutableStateOf<WordDetail?>(null) }
     var currentStatus by remember(wordId) { mutableStateOf<UserWordStatus?>(null) }
     var saving by remember(wordId) { mutableStateOf(false) }
@@ -431,7 +505,13 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                             } else sense.examples.forEachIndexed { i,example ->
                                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(AppBg).padding(11.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                                     Text("例句 ${i+1} · ${example.source}",fontSize=10.sp,color=Muted)
-                                    Text(example.english,color=Ink,fontSize=14.sp,lineHeight=20.sp)
+                                    SelectableReadingText(
+                                        text=example.english,
+                                        onBlankClick={},
+                                        onNoteSelection={},
+                                        onWordLookup=onWordLookup,
+                                        showNoteAction=false
+                                    )
                                     if(example.chinese.isNotBlank()) Text(example.chinese,color=Muted,fontSize=12.sp,lineHeight=17.sp)
                                 }
                             }
@@ -477,6 +557,7 @@ private fun DailyReviewScreen(
     repo:ContentDb,
     dao:UserDao,
     snackbarHostState:SnackbarHostState,
+    onWordLookup:(String)->Unit,
     onBack:()->Unit,
     onReviewDone:()->Unit,
     onReviewUndo:()->Unit
@@ -515,6 +596,7 @@ private fun DailyReviewScreen(
             progress=(completedCount+1) to (completedCount+entries.size),
             repo=repo,
             dao=dao,
+            onWordLookup=onWordLookup,
             onBack=onBack,
             onRated={
                 onReviewDone()
@@ -1035,12 +1117,12 @@ private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingPara
 }
 
 @Composable
-private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit,userHighlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null) {
-    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end } + userHighlightRanges, onHighlightSelection)
+private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit,userHighlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null,onWordLookup:((String)->Unit)? = null) {
+    SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end } + userHighlightRanges, onHighlightSelection,onWordLookup)
 }
 
 @Composable
-private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null,onWordLookup:((String)->Unit)? = null) {
+private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSelection:(String)->Unit,highlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null,onWordLookup:((String)->Unit)? = null,showNoteAction:Boolean = true) {
     val currentBlankClick by rememberUpdatedState(onBlankClick)
     val currentNoteSelection by rememberUpdatedState(onNoteSelection)
     val currentHighlightSelection = rememberUpdatedState(onHighlightSelection)
@@ -1058,14 +1140,14 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
                 movementMethod=LinkMovementMethod.getInstance()
                 customSelectionActionModeCallback=object:ActionMode.Callback {
                     override fun onCreateActionMode(mode:ActionMode,menu:Menu):Boolean {
-                        menu.add(Menu.NONE,1,Menu.NONE,"记笔记")
+                        if(showNoteAction) menu.add(Menu.NONE,1,Menu.NONE,"记笔记")
                         if(currentHighlightSelection.value!=null) menu.add(Menu.NONE,2,Menu.NONE,"标黄")
                         if(currentWordLookup.value!=null) menu.add(Menu.NONE,3,Menu.NONE,"查单词")
                         return true
                     }
                     override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
                     override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
-                        if(item.itemId !in 1..3) return false
+                        if(item.itemId !in 1..3 || (item.itemId==1 && !showNoteAction)) return false
                         val selectedText=text?.toString().orEmpty()
                         val start=minOf(selectionStart,selectionEnd).coerceIn(0,selectedText.length)
                         val end=maxOf(selectionStart,selectionEnd).coerceIn(start,selectedText.length)
@@ -1147,7 +1229,7 @@ private fun highlightedText(text:String,json:String,sourceText:String=text):andr
 }
 
 @Composable
-private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
+private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit,onWordLookup:(String)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var rows by remember { mutableStateOf(emptyList<TranslationItem>()) }
     var index by remember(selectedId) { mutableIntStateOf(0) }
     var revealed by remember(selectedId,index) { mutableStateOf(false) }
@@ -1162,11 +1244,11 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
             Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleBlue),shape=RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(22.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                     Text("先在心里翻译",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold)
-                    SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.chinese),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote)
+                    SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.chinese),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote,onWordLookup=onWordLookup)
                     if(revealed) {
                         HorizontalDivider(color=Color.White.copy(alpha=.8f))
-                        if(item.reference.isNotBlank()) { Text("参考译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.reference),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
-                        if(item.optimized.isNotBlank()) { Text("优化译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.optimized),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote) }
+                        if(item.reference.isNotBlank()) { Text("参考译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.reference),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote,onWordLookup=onWordLookup) }
+                        if(item.optimized.isNotBlank()) { Text("优化译文",fontSize=12.sp,color=Green,fontWeight=FontWeight.Bold); SelectableNoteText(androidx.compose.ui.text.AnnotatedString(item.optimized),"translation",item.unitId,"翻译笔记 · 第 ${item.orderNo} 句",onNote,onWordLookup=onWordLookup) }
                         if(item.reference.isBlank()&&item.optimized.isBlank()) Text("参考译文正在补入",fontSize=13.sp,color=Muted)
                     } else Text("点卡片查看译文",fontSize=13.sp,color=Muted)
                 }
@@ -1181,7 +1263,7 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit) {
 }
 
 @Composable
-private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) {
+private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,onWordLookup:(String)->Unit) {
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     var selectedId by remember { mutableStateOf("") }
     var item by remember { mutableStateOf<WritingItem?>(null) }
@@ -1220,7 +1302,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                 Card(colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(20.dp)) {
                     Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                         Text("写作题目",color=Green,fontSize=13.sp,fontWeight=FontWeight.SemiBold)
-                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote)
+                        SelectableNoteText(androidx.compose.ui.text.AnnotatedString(current.prompt),"writing",current.promptUnitId,"作文题目笔记",onNote,onWordLookup=onWordLookup)
                     }
                 }
             }
@@ -1242,6 +1324,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit) 
                             highlightedText(displayText,sample.highlightsJson,sample.text),
                             "writing",sample.sampleId.toInt(),"作文笔记 · $label",onNote,
                             userHighlightRanges=userRanges,
+                            onWordLookup=onWordLookup,
                             onHighlightSelection={start,end ->
                                 if(start>=0 && end>start && end<=displayText.length) {
                                     val selected=displayText.substring(start,end)
