@@ -211,6 +211,7 @@ private fun Cet6StudyApp() {
                     Page.READING -> ReadingScreen(
                         repo, dao, todayAddedWordIds,
                         onNote = { noteTarget = it },
+                        onWordNotFound = { scope.launch { snackbarHostState.showSnackbar("无：2500 词库中没有这个词") } },
                         onAddToToday = { wordId ->
                             scope.launch {
                                 val alreadyPlanned=withContext(Dispatchers.IO) {
@@ -378,9 +379,9 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
         }
         val plannedIds=when(mode){WordListMode.NEW->newIds;WordListMode.REVIEW->dueIds;WordListMode.ALL->emptyList()}
         val wordsById=words.associateBy { it.wordId }
-        val visibleWords=if(mode!=WordListMode.ALL) plannedIds.mapNotNull { wordsById[it] }.filter { it.exampleCount>=3 } else words
+        val visibleWords=if(mode!=WordListMode.ALL) plannedIds.mapNotNull { wordsById[it] } else words
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            if(visibleWords.isEmpty()) item { Text(if(mode!=WordListMode.ALL && search.isBlank()) if(mode==WordListMode.REVIEW) "当前没有到期复习的单词。" else "新词已学完。例句未齐的词会等补齐后再进入新词。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
+            if(visibleWords.isEmpty()) item { Text(if(mode!=WordListMode.ALL && search.isBlank()) if(mode==WordListMode.REVIEW) "当前没有到期复习的单词。" else "新词已学完。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
             items(visibleWords,key={it.wordId}) { word ->
                 Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -426,7 +427,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                         Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
                             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){Text(sense.pos,color=Green,fontSize=12.sp,fontWeight=FontWeight.Bold);Text(sense.meaning,color=Ink,fontSize=17.sp,fontWeight=FontWeight.SemiBold)}
                             if(sense.examples.isEmpty()) {
-                                Text("这个词的默认例句还在补充，暂不进入今日新词。",color=Color(0xFF9B6B2F),fontSize=12.sp,modifier=Modifier.clip(RoundedCornerShape(10.dp)).background(PaleYellow).padding(10.dp))
+                                Text("暂无默认例句",color=Muted,fontSize=12.sp,modifier=Modifier.clip(RoundedCornerShape(10.dp)).background(AppBg).padding(10.dp))
                             } else sense.examples.forEachIndexed { i,example ->
                                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(AppBg).padding(11.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                                     Text("例句 ${i+1} · ${example.source}",fontSize=10.sp,color=Muted)
@@ -438,7 +439,6 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                     }
                 }
                 if(revealed) item {
-                    if(w.senses.sumOf{it.examples.size}<3) Text("默认例句目前 ${w.senses.sumOf{it.examples.size}}/3；补充后会自动出现在这里。",fontSize=12.sp,color=Muted)
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
                     Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
@@ -598,10 +598,25 @@ private fun saveNoteRating(value:String,note:UserNote,dao:UserDao,scope:kotlinx.
 }
 
 @Composable
-private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,onNote:(NoteTarget)->Unit,onAddToToday:(Int)->Unit) {
+private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,onNote:(NoteTarget)->Unit,onWordNotFound:()->Unit,onAddToToday:(Int)->Unit) {
     var lookupWord by remember { mutableStateOf<WordDetail?>(null) }
+    var lookupChoices by remember { mutableStateOf(emptyList<WordCard>()) }
+    var wordFormIndex by remember(repo) { mutableStateOf<Map<String,List<WordCard>>?>(null) }
     var lookupIsStudied by remember { mutableStateOf(false) }
     var lookupAlreadyAdded by remember { mutableStateOf(false) }
+    suspend fun getWordFormIndex():Map<String,List<WordCard>> {
+        val cached=wordFormIndex
+        if(cached!=null) return cached
+        val built=withContext(Dispatchers.IO) { buildWordFormIndex(repo.getWordFormSources()) }
+        wordFormIndex=built
+        return built
+    }
+    suspend fun showLookupWord(wordId:Int) {
+        lookupChoices=emptyList()
+        lookupWord=withContext(Dispatchers.IO) { repo.getWord(wordId) }
+        lookupIsStudied=withContext(Dispatchers.IO) { dao.status(wordId)!=null }
+        lookupAlreadyAdded=wordId in todayAddedWordIds
+    }
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     var selectedId by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf("") }
@@ -689,16 +704,17 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                             onBlankClick={number->blankQuestions.firstOrNull{it.questionNo==number}?.let{selectedBlankId=it.unitId}},
                             onNoteSelection={selection->onNote(NoteTarget("reading",sentence.unitId,"阅读摘录笔记",sourceText=selection))},
                             onWordLookup={selection ->
-                                val term=Regex("[A-Za-z]+(?:['-][A-Za-z]+)*").find(selection)?.value
+                                val term=Regex("[A-Za-z]+(?:['-][A-Za-z]+)*").find(selection)?.value?.lowercase()
                                 lookupWord=null
-                                if(term!=null) scope.launch {
-                                    val found=withContext(Dispatchers.IO) {
-                                        repo.getWords(term,2500).firstOrNull { it.lemma.equals(term,ignoreCase=true) }
-                                    }
-                                    if(found!=null) {
-                                        lookupWord=withContext(Dispatchers.IO) { repo.getWord(found.wordId) }
-                                        lookupIsStudied=withContext(Dispatchers.IO) { dao.status(found.wordId)!=null }
-                                        lookupAlreadyAdded=found.wordId in todayAddedWordIds
+                                lookupChoices=emptyList()
+                                if(term.isNullOrBlank()) onWordNotFound() else scope.launch {
+                                    val allMatches=getWordFormIndex()[term].orEmpty()
+                                    val exact=allMatches.firstOrNull { it.lemma.equals(term,ignoreCase=true) }
+                                    val matches=if(exact!=null) listOf(exact) else allMatches
+                                    when(matches.size) {
+                                        0 -> onWordNotFound()
+                                        1 -> showLookupWord(matches.first().wordId)
+                                        else -> lookupChoices=matches
                                     }
                                 }
                             }
@@ -791,6 +807,23 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
             }
         }
     }
+    if(lookupChoices.isNotEmpty()) AlertDialog(
+        onDismissRequest={lookupChoices=emptyList()},
+        title={Text("找到多个词条，请选择",color=DarkGreen)},
+        text={
+            Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                lookupChoices.forEach { choice ->
+                    TextButton(onClick={scope.launch { showLookupWord(choice.wordId) }},modifier=Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text(choice.lemma,fontWeight=FontWeight.SemiBold,color=DarkGreen)
+                            Text(choice.meanings.replace(",","；"),fontSize=12.sp,color=Muted)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton={TextButton(onClick={lookupChoices=emptyList()}){Text("关闭",color=Green)}}
+    )
     lookupWord?.let { word ->
         AlertDialog(
             onDismissRequest={lookupWord=null},
@@ -807,14 +840,13 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                             }
                         }
                     }
-                    if(word.senses.sumOf { it.examples.size }<3) Text("默认例句不足 3 条，暂不能加入新词任务。",fontSize=12.sp,color=Color(0xFF9B6B2F))
+                    if(word.senses.sumOf { it.examples.size }==0) Text("暂无默认例句",fontSize=12.sp,color=Muted)
                 }
             },
             confirmButton={
                 if(lookupIsStudied) TextButton(onClick={lookupWord=null}) { Text("已学过",color=Muted) }
                 else if(lookupAlreadyAdded) TextButton(onClick={lookupWord=null}) { Text("已加入今天",color=Green) }
                 else TextButton(
-                    enabled=word.senses.sumOf { it.examples.size }>=3,
                     onClick={onAddToToday(word.wordId);lookupAlreadyAdded=true}
                 ) { Text("加入今天学习",color=Green) }
             },
@@ -823,6 +855,169 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
     }
 }
 
+private fun buildWordFormIndex(sources:List<WordFormSource>):Map<String,List<WordCard>> {
+    val byLemma=sources.associateBy { it.word.lemma.lowercase() }
+    val forms=linkedMapOf<String,LinkedHashSet<WordCard>>()
+    fun register(form:String,word:WordCard) {
+        if(form.length>=2) forms.getOrPut(form.lowercase()) { linkedSetOf() }.add(word)
+    }
+    fun consonantY(word:String)=word.length>1 && word.endsWith("y") && word[word.lastIndex-1].lowercaseChar() !in "aeiou"
+    fun shouldDouble(word:String):Boolean {
+        if(word.length<3 || word.last() in "wxy") return false
+        val tail=word.takeLast(3)
+        val vowelGroups=Regex("[aeiouy]+").findAll(word).count()
+        return vowelGroups==1 && tail[0].lowercaseChar() !in "aeiou" &&
+            tail[1].lowercaseChar() in "aeiou" && tail[2].lowercaseChar() !in "aeiou"
+    }
+
+    val irregular=mapOf(
+        "be" to listOf("am","is","are","was","were","been"),
+        "go" to listOf("goes","went","gone"),
+        "do" to listOf("does","did","done"),
+        "have" to listOf("has","had"),
+        "say" to listOf("says","said"),
+        "make" to listOf("made"),
+        "take" to listOf("takes","took","taken"),
+        "come" to listOf("comes","came"),
+        "get" to listOf("gets","got","gotten"),
+        "give" to listOf("gives","gave","given"),
+        "know" to listOf("knows","knew","known"),
+        "think" to listOf("thinks","thought"),
+        "see" to listOf("sees","saw","seen"),
+        "find" to listOf("finds","found"),
+        "tell" to listOf("tells","told"),
+        "become" to listOf("becomes","became"),
+        "begin" to listOf("begins","began","begun"),
+        "bring" to listOf("brings","brought"),
+        "buy" to listOf("buys","bought"),
+        "build" to listOf("builds","built"),
+        "choose" to listOf("chooses","chose","chosen"),
+        "feel" to listOf("feels","felt"),
+        "leave" to listOf("leaves","left"),
+        "keep" to listOf("keeps","kept"),
+        "hold" to listOf("holds","held"),
+        "hear" to listOf("hears","heard"),
+        "run" to listOf("runs","ran"),
+        "write" to listOf("writes","wrote","written"),
+        "speak" to listOf("speaks","spoke","spoken"),
+        "break" to listOf("breaks","broke","broken"),
+        "drive" to listOf("drives","drove","driven"),
+        "eat" to listOf("eats","ate","eaten"),
+        "fall" to listOf("falls","fell","fallen"),
+        "grow" to listOf("grows","grew","grown"),
+        "draw" to listOf("draws","drew","drawn"),
+        "fly" to listOf("flies","flew","flown"),
+        "wear" to listOf("wears","wore","worn"),
+        "throw" to listOf("throws","threw","thrown"),
+        "stand" to listOf("stands","stood"),
+        "understand" to listOf("understands","understood"),
+        "win" to listOf("wins","won"),
+        "lose" to listOf("loses","lost"),
+        "pay" to listOf("pays","paid"),
+        "meet" to listOf("meets","met"),
+        "sit" to listOf("sits","sat"),
+        "sleep" to listOf("sleeps","slept"),
+        "lead" to listOf("leads","led"),
+        "teach" to listOf("teaches","taught"),
+        "catch" to listOf("catches","caught"),
+        "fight" to listOf("fights","fought"),
+        "seek" to listOf("seeks","sought"),
+        "sell" to listOf("sells","sold"),
+        "send" to listOf("sends","sent"),
+        "deal" to listOf("deals","dealt"),
+        "mean" to listOf("means","meant"),
+        "hang" to listOf("hangs","hung"),
+        "shake" to listOf("shakes","shook","shaken"),
+        "sing" to listOf("sings","sang","sung"),
+        "swim" to listOf("swims","swam","swum"),
+        "drink" to listOf("drinks","drank","drunk"),
+        "ring" to listOf("rings","rang","rung"),
+        "rise" to listOf("rises","rose","risen"),
+        "steal" to listOf("steals","stole","stolen"),
+        "shine" to listOf("shines","shone"),
+        "lay" to listOf("lays","laid"),
+        "lie" to listOf("lies","lay","lain"),
+        "child" to listOf("children"),
+        "leaf" to listOf("leaves"),
+        "life" to listOf("lives"),
+        "knife" to listOf("knives"),
+        "wife" to listOf("wives"),
+        "shelf" to listOf("shelves"),
+        "self" to listOf("selves"),
+        "half" to listOf("halves"),
+        "wolf" to listOf("wolves"),
+        "loaf" to listOf("loaves"),
+        "axis" to listOf("axes"),
+        "basis" to listOf("bases"),
+        "diagnosis" to listOf("diagnoses"),
+        "oasis" to listOf("oases"),
+        "person" to listOf("people"),
+        "man" to listOf("men"),
+        "woman" to listOf("women"),
+        "foot" to listOf("feet"),
+        "tooth" to listOf("teeth"),
+        "mouse" to listOf("mice"),
+        "goose" to listOf("geese"),
+        "analysis" to listOf("analyses"),
+        "crisis" to listOf("crises"),
+        "thesis" to listOf("theses"),
+        "criterion" to listOf("criteria"),
+        "phenomenon" to listOf("phenomena")
+    )
+
+    for(source in sources) {
+        val word=source.word
+        val lemma=word.lemma.lowercase()
+        register(lemma,word)
+        val pos=source.partsOfSpeech.lowercase()
+        val tags=pos.split(',', '/', ';').map { it.trim() }
+        val hasNoun=tags.any { it.startsWith("n") || it.contains("noun") || it.contains("名词") }
+        val hasVerb=tags.any { it.startsWith("v") || it.contains("verb") || it.contains("动词") }
+        val makeNounForms=hasNoun || (!hasNoun && !hasVerb)
+        val makeVerbForms=hasVerb || (!hasNoun && !hasVerb)
+
+        if(makeNounForms) {
+            val plural=when {
+                consonantY(lemma) -> lemma.dropLast(1)+"ies"
+                lemma.endsWith("s") || lemma.endsWith("x") || lemma.endsWith("z") ||
+                    lemma.endsWith("ch") || lemma.endsWith("sh") -> lemma+"es"
+                else -> lemma+"s"
+            }
+            register(plural,word)
+            if(lemma.endsWith("o")) register(lemma+"es",word)
+        }
+        if(makeVerbForms) {
+            val thirdPerson=when {
+                consonantY(lemma) -> lemma.dropLast(1)+"ies"
+                lemma.endsWith("s") || lemma.endsWith("x") || lemma.endsWith("z") ||
+                    lemma.endsWith("ch") || lemma.endsWith("sh") || lemma.endsWith("o") -> lemma+"es"
+                else -> lemma+"s"
+            }
+            val past=when {
+                lemma.endsWith("e") -> lemma+"d"
+                consonantY(lemma) -> lemma.dropLast(1)+"ied"
+                shouldDouble(lemma) -> lemma+lemma.last()+"ed"
+                else -> lemma+"ed"
+            }
+            val participle=when {
+                lemma.endsWith("ie") -> lemma.dropLast(2)+"ying"
+                lemma.endsWith("e") && !lemma.endsWith("ee") && !lemma.endsWith("ye") && !lemma.endsWith("oe") -> lemma.dropLast(1)+"ing"
+                shouldDouble(lemma) -> lemma+lemma.last()+"ing"
+                else -> lemma+"ing"
+            }
+            register(thirdPerson,word)
+            register(past,word)
+            register(participle,word)
+        }
+    }
+    for((lemma,inflections) in irregular) {
+        val source=byLemma[lemma] ?: continue
+        inflections.forEach { register(it,source.word) }
+    }
+    return forms.mapValues { it.value.toList() }
+}
+
+/** Indexes regular and common irregular forms back to existing corpus lemmas. */
 private data class ReadingParagraph(val paragraphNo:Int?,val sentences:List<ReadingSentence>)
 
 /** Use paragraph numbers from the source data where available. For records without them,
