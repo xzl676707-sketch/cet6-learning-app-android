@@ -91,7 +91,7 @@ class ContentDb private constructor(context: Context) {
             FROM words w LEFT JOIN word_senses s ON s.word_id=w.word_id
             GROUP BY w.word_id ORDER BY w.rank_no,w.word_id
         """.trimIndent()
-        return database.rawQuery(sql, emptyArray()).use { c ->
+        return database.rawQuery(sql, emptyArray<String>()).use { c ->
             buildList {
                 while (c.moveToNext()) {
                     val card=WordCard(c.getInt(0),c.getInt(1),c.getString(2),c.getString(3),c.getInt(4),c.getInt(5),c.getString(6),c.getInt(7))
