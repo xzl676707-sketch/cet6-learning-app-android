@@ -212,9 +212,17 @@ private fun Cet6StudyApp() {
                         repo, dao, todayAddedWordIds,
                         onNote = { noteTarget = it },
                         onAddToToday = { wordId ->
-                            todayAddedWordIds = todayAddedWordIds + wordId
-                            goalPrefs.edit().putStringSet("today_added_words_$todayKey", todayAddedWordIds.map { it.toString() }.toSet()).apply()
-                            scope.launch { snackbarHostState.showSnackbar("已加入今天的新词任务") }
+                            scope.launch {
+                                val alreadyPlanned=withContext(Dispatchers.IO) {
+                                    val seen=dao.studiedWordIds().toSet()
+                                    repo.getNewWordIds((newGoal-newDoneToday).coerceAtLeast(0),seen).contains(wordId)
+                                }
+                                if(!alreadyPlanned) {
+                                    todayAddedWordIds = todayAddedWordIds + wordId
+                                    goalPrefs.edit().putStringSet("today_added_words_$todayKey", todayAddedWordIds.map { it.toString() }.toSet()).apply()
+                                }
+                                snackbarHostState.showSnackbar(if(alreadyPlanned) "这个词已在今天的新词队列中" else "已加入今天的新词任务")
+                            }
                         }
                     )
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it })
