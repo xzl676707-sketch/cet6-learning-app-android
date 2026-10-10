@@ -109,7 +109,40 @@ private fun Cet6StudyApp() {
     var newDoneToday by remember { mutableIntStateOf(0) }
     var sharedLookupWord by remember { mutableStateOf<WordDetail?>(null) }
     var sharedLookupChoices by remember { mutableStateOf(emptyList<WordCard>()) }
+    var sharedLookupIsStudied by remember { mutableStateOf(false) }
+    var sharedLookupAlreadyAdded by remember { mutableStateOf(false) }
     var sharedWordFormIndex by remember { mutableStateOf<Map<String,List<WordCard>>?>(null) }
+    suspend fun showSharedLookupWord(wordId:Int) {
+        val loaded=withContext(Dispatchers.IO) { repo.getWord(wordId) }
+        if(loaded==null) {
+            snackbarHostState.showSnackbar("无：2500 词库中没有这个词")
+            return
+        }
+        sharedLookupWord=loaded
+        sharedLookupChoices=emptyList()
+        sharedLookupIsStudied=withContext(Dispatchers.IO) { dao.status(wordId)!=null }
+        val seen=withContext(Dispatchers.IO) { dao.studiedWordIds().toSet() }
+        val planned=withContext(Dispatchers.IO) {
+            repo.getNewWordIds((newGoal-newDoneToday).coerceAtLeast(0),seen).contains(wordId)
+        }
+        sharedLookupAlreadyAdded=wordId in todayAddedWordIds || planned
+    }
+    fun addSharedLookupToToday(wordId:Int) {
+        scope.launch {
+            val alreadyAdded=wordId in todayAddedWordIds
+            val seen=withContext(Dispatchers.IO) { dao.studiedWordIds().toSet() }
+            val alreadyPlanned=withContext(Dispatchers.IO) {
+                repo.getNewWordIds((newGoal-newDoneToday).coerceAtLeast(0),seen).contains(wordId)
+            }
+            if(!alreadyAdded && !alreadyPlanned) {
+                val updated=todayAddedWordIds+wordId
+                todayAddedWordIds=updated
+                goalPrefs.edit().putStringSet("today_added_words_$todayKey",updated.map{it.toString()}.toSet()).apply()
+            }
+            sharedLookupAlreadyAdded=true
+            snackbarHostState.showSnackbar(if(alreadyAdded || alreadyPlanned) "这个词已在今天的学习计划中" else "已加入今天的学习计划")
+        }
+    }
     fun lookupSelectedText(selection:String) {
         val term=Regex("[A-Za-z]+(?:['-][A-Za-z]+)*").find(selection)?.value?.lowercase()
         if(term.isNullOrBlank()) {
@@ -125,10 +158,7 @@ private fun Cet6StudyApp() {
             val matches=if(exact!=null) listOf(exact) else allMatches
             when(matches.size) {
                 0 -> snackbarHostState.showSnackbar("无：2500 词库中没有这个词")
-                1 -> {
-                    sharedLookupChoices=emptyList()
-                    sharedLookupWord=withContext(Dispatchers.IO) { repo.getWord(matches.first().wordId) }
-                }
+                1 -> showSharedLookupWord(matches.first().wordId)
                 else -> {
                     sharedLookupWord=null
                     sharedLookupChoices=matches
@@ -269,8 +299,7 @@ private fun Cet6StudyApp() {
                     Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
                         sharedLookupChoices.forEach { choice ->
                             TextButton(onClick={
-                                sharedLookupChoices=emptyList()
-                                scope.launch { sharedLookupWord=withContext(Dispatchers.IO){repo.getWord(choice.wordId)} }
+                                scope.launch { showSharedLookupWord(choice.wordId) }
                             },modifier=Modifier.fillMaxWidth()) {
                                 Column(Modifier.fillMaxWidth()) {
                                     Text(choice.lemma,fontWeight=FontWeight.SemiBold,color=DarkGreen)
@@ -302,7 +331,14 @@ private fun Cet6StudyApp() {
                             if(word.senses.isEmpty()) Text("暂无词义数据",fontSize=12.sp,color=Muted)
                         }
                     },
-                    confirmButton={TextButton(onClick={sharedLookupWord=null}){Text("关闭",color=Green)}}
+                    confirmButton={
+                        when {
+                            sharedLookupIsStudied -> TextButton(onClick={sharedLookupWord=null}) { Text("已学过",color=Muted) }
+                            sharedLookupAlreadyAdded -> TextButton(onClick={sharedLookupWord=null}) { Text("已加入今天",color=Green) }
+                            else -> TextButton(onClick={addSharedLookupToToday(word.wordId)}) { Text("加入今天学习",color=Green) }
+                        }
+                    },
+                    dismissButton={TextButton(onClick={sharedLookupWord=null}){Text("关闭")}}
                 )
             }
         }
@@ -1148,7 +1184,7 @@ private fun SelectableReadingText(text:String,onBlankClick:(Int)->Unit,onNoteSel
                     override fun onPrepareActionMode(mode:ActionMode,menu:Menu)=false
                     override fun onActionItemClicked(mode:ActionMode,item:MenuItem):Boolean {
                         if(item.itemId !in 1..3 || (item.itemId==1 && !showNoteAction)) return false
-                        val selectedText=text?.toString().orEmpty()
+                        val selectedText=currentText
                         val start=minOf(selectionStart,selectionEnd).coerceIn(0,selectedText.length)
                         val end=maxOf(selectionStart,selectionEnd).coerceIn(start,selectedText.length)
                         if(end>start) {
