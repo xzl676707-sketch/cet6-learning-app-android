@@ -50,14 +50,7 @@ class ContentDb private constructor(context: Context) {
     }
 
     fun wordCount(): Int = database.rawQuery("SELECT COUNT(*) FROM words", null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
-    fun readyWordCount(): Int = database.rawQuery("""
-        SELECT COUNT(*) FROM (
-          SELECT w.word_id FROM words w
-          LEFT JOIN word_senses s ON s.word_id=w.word_id
-          LEFT JOIN word_examples e ON e.sense_id=s.sense_id AND e.is_default=1
-          GROUP BY w.word_id HAVING COUNT(e.example_link_id)>=3
-        )
-    """.trimIndent(), null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    fun readyWordCount(): Int = wordCount()
 
     fun getWords(search: String = "", limit: Int = 250): List<WordCard> {
         val pattern = "%${search.trim()}%"
