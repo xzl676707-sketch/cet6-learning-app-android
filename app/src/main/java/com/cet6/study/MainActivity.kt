@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.cet6.study.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -76,9 +78,9 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, typography = Typography(), content = content)
 }
 
-private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习") }
+private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习"), ALL_NOTES("全部笔记") }
 private enum class WordListMode { NEW, REVIEW, ALL }
-private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "", val storageType: String = type)
+private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "", val storageType: String = type, val existingNoteId: Long? = null)
 private sealed class ReviewQueueEntry {
     abstract val dueAt: Long
     data class Word(val wordId: Int, override val dueAt: Long) : ReviewQueueEntry()
@@ -99,6 +101,7 @@ private fun Cet6StudyApp() {
     var ratedWordIds by remember { mutableStateOf(emptySet<Int>()) }
     var wordListMode by remember { mutableStateOf(WordListMode.NEW) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
+    var allNotesRefresh by remember { mutableIntStateOf(0) }
     var studied by remember { mutableIntStateOf(0) }
     var due by remember { mutableIntStateOf(0) }
     var dueNotes by remember { mutableIntStateOf(0) }
@@ -192,7 +195,7 @@ private fun Cet6StudyApp() {
         containerColor = AppBg,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (selectedWordId == null && noteTarget == null && page != Page.NOTE_REVIEW) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
+            if (selectedWordId == null && noteTarget == null && page != Page.NOTE_REVIEW && page != Page.ALL_NOTES) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
                     Triple(Page.HOME, Icons.Outlined.Home, "首页"),
                     Triple(Page.WORDS, Icons.Outlined.BookmarkBorder, "单词"),
@@ -208,7 +211,6 @@ private fun Cet6StudyApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
-                noteTarget != null -> NotesScreen(noteTarget!!, dao, onBack = { noteTarget = null; scope.launch { refreshCounts() } })
                 page == Page.NOTE_REVIEW -> DailyReviewScreen(
                     repo = repo,
                     dao = dao,
@@ -260,6 +262,7 @@ private fun Cet6StudyApp() {
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
                         onNoteReview = { page = Page.NOTE_REVIEW },
+                        onAllNotes = { page = Page.ALL_NOTES },
                         onGoalChange = { newValue ->
                             newGoal = newValue
                             goalPrefs.edit().putInt("new_goal", newValue).apply()
@@ -290,6 +293,14 @@ private fun Cet6StudyApp() {
                     Page.TRANSLATION -> TranslationScreen(repo, onNote = { noteTarget = it }, onWordLookup = ::lookupSelectedText)
                     Page.WRITING -> WritingScreen(repo, dao, onNote = { noteTarget = it }, onWordLookup = ::lookupSelectedText)
                     Page.NOTE_REVIEW -> Unit
+                    Page.ALL_NOTES -> AllNotesScreen(
+                        dao = dao,
+                        refreshToken = allNotesRefresh,
+                        onBack = { page = Page.HOME },
+                        onOpenNote = { note ->
+                            noteTarget = NoteTarget(note.itemType, note.itemId, "学习笔记 · ${noteTypeLabel(note.itemType)}", note.sourceText, existingNoteId = note.noteId)
+                        }
+                    )
                 }
             }
             if(sharedLookupChoices.isNotEmpty()) AlertDialog(
@@ -341,12 +352,28 @@ private fun Cet6StudyApp() {
                     dismissButton={TextButton(onClick={sharedLookupWord=null}){Text("关闭")}}
                 )
             }
+            noteTarget?.let { target ->
+                Dialog(
+                    onDismissRequest = { noteTarget = null; scope.launch { refreshCounts() } },
+                    properties = DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    NotesScreen(
+                        target = target,
+                        dao = dao,
+                        onBack = { noteTarget = null; scope.launch { refreshCounts() } },
+                        onSaved = {
+                            allNotesRefresh += 1
+                            scope.launch { refreshCounts(); snackbarHostState.showSnackbar("笔记已保存") }
+                        }
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,addedTodayCount:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onGoalChange:(Int)->Unit) {
+private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,dueNotes: Int,newGoal:Int,addedTodayCount:Int,newDone:Int,reviewDone:Int,onNewWords:()->Unit,onReview:()->Unit,onWords:()->Unit,onReading:()->Unit,onTranslation:()->Unit,onWriting:()->Unit,onNoteReview:()->Unit,onAllNotes:()->Unit,onGoalChange:(Int)->Unit) {
     var showGoalDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
@@ -390,6 +417,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
         }
         item { ModuleCard("作文积累","题目、范文与个人笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onWriting) }
         item { ModuleCard("今日复习","单词 $due · 笔记 $dueNotes",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
+        item { ModuleCard("全部笔记","查看和编辑所有已保存的笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onAllNotes) }
         item {
             Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp)) {
@@ -1437,29 +1465,123 @@ private fun resolveUserHighlightRanges(text:String,highlights:List<UserWritingHi
         if(start>=0) start until (start+selected.length) else null
     }
 @Composable
-private fun NotesScreen(target:NoteTarget,dao:UserDao,onBack:()->Unit) {
-    var text by remember { mutableStateOf("") };var loaded by remember { mutableStateOf(false) };var saved by remember { mutableStateOf(false) };var current by remember(target){mutableStateOf<UserNote?>(null)};val scope=rememberCoroutineScope()
-    LaunchedEffect(target){
-        current=withContext(Dispatchers.IO){dao.notes(target.type,target.id)}.firstOrNull{it.sourceText==target.sourceText}
-        text=current?.content.orEmpty()
-        loaded=true
+private fun AllNotesScreen(dao: UserDao, refreshToken: Int, onBack: () -> Unit, onOpenNote: (UserNote) -> Unit) {
+    var notes by remember { mutableStateOf(emptyList<UserNote>()) }
+    LaunchedEffect(refreshToken) {
+        notes = withContext(Dispatchers.IO) { dao.allNotes() }
     }
-    Column(Modifier.fillMaxSize().padding(horizontal=20.dp, vertical=12.dp)) {
-        TopAppBar(title={Text("学习笔记")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
-        Text(target.title,fontSize=22.sp,fontWeight=FontWeight.Bold,color=Ink,modifier=Modifier.padding(top=18.dp,bottom=12.dp))
-        if(target.sourceText.isNotBlank()) Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) { Text(target.sourceText,fontSize=15.sp,lineHeight=23.sp,color=Ink,modifier=Modifier.fillMaxWidth().padding(17.dp)) }
-        OutlinedTextField(value=text,onValueChange={text=it;saved=false},modifier=Modifier.fillMaxWidth().weight(1f).padding(top=14.dp),placeholder={Text("写下释义、表达用法或自己的理解")},shape=RoundedCornerShape(20.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green))
-        Button(onClick={scope.launch {
-            val now=System.currentTimeMillis()
-            val old=current
-            val draft=old?.copy(content=text,updatedAt=now) ?: UserNote(itemType=target.type,itemId=target.id,sourceText=target.sourceText,content=text,updatedAt=now,reviewStage=-1,nextReview=now+24L*60L*60L*1000L)
-            val newId=withContext(Dispatchers.IO){dao.saveNote(draft)}
-            current=draft.copy(noteId=newId)
-            saved=true
-        }},enabled=loaded&&text.isNotBlank(),modifier=Modifier.fillMaxWidth().padding(top=14.dp,bottom=8.dp),shape=RoundedCornerShape(17.dp),colors=ButtonDefaults.buttonColors(containerColor=Green)){Text(if(saved)"已保存并加入笔记复习" else "保存笔记")}
+    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+        Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("‹ 返回", color = Green) }
+            Text("全部笔记", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = DarkGreen)
+        }
+        if (notes.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("还没有保存的笔记", color = Muted, fontSize = 15.sp)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(notes, key = { it.noteId }) { note ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth().clickable { onOpenNote(note) },
+                        colors = CardDefaults.cardColors(containerColor = CardBg),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Text(noteTypeLabel(note.itemType), color = Green, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            if (note.sourceText.isNotBlank()) {
+                                Text(note.sourceText, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            Text(note.content, color = Ink, fontSize = 15.sp, lineHeight = 22.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                            Text("点击查看或继续编辑", color = Muted, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
+private fun noteTypeLabel(type: String): String = when (type) {
+    "reading" -> "阅读笔记"
+    "translation" -> "翻译笔记"
+    "writing" -> "作文笔记"
+    "word" -> "单词笔记"
+    else -> "学习笔记"
+}
+
+@Composable
+private fun NotesScreen(target: NoteTarget, dao: UserDao, onBack: () -> Unit, onSaved: () -> Unit) {
+    var text by remember(target) { mutableStateOf("") }
+    var loaded by remember(target) { mutableStateOf(false) }
+    var current by remember(target) { mutableStateOf<UserNote?>(null) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(target) {
+        current = withContext(Dispatchers.IO) {
+            target.existingNoteId?.let { dao.noteById(it) }
+                ?: dao.notes(target.type, target.id).firstOrNull { it.sourceText == target.sourceText }
+        }
+        text = current?.content.orEmpty()
+        loaded = true
+    }
+    Column(
+        Modifier.fillMaxSize().background(AppBg).imePadding().padding(horizontal = 20.dp, vertical = 12.dp)
+    ) {
+        TopAppBar(
+            title = { Text("学习笔记") },
+            navigationIcon = { TextButton(onClick = onBack) { Text("‹ 返回", color = Green) } },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = AppBg)
+        )
+        Text(target.title, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.padding(top = 12.dp, bottom = 10.dp))
+        if (target.sourceText.isNotBlank()) {
+            Card(
+                modifier = Modifier.heightIn(max = 118.dp),
+                colors = CardDefaults.cardColors(containerColor = PaleYellow),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Text(
+                    target.sourceText,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    color = Ink,
+                    maxLines = 5,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(14.dp)
+                )
+            }
+        }
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 12.dp),
+            placeholder = { Text("写下释义、表达用法或自己的理解") },
+            shape = RoundedCornerShape(20.dp),
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Green)
+        )
+        Button(
+            onClick = {
+                scope.launch {
+                    val now = System.currentTimeMillis()
+                    val old = current
+                    val draft = old?.copy(content = text, updatedAt = now)
+                        ?: UserNote(itemType = target.type, itemId = target.id, sourceText = target.sourceText, content = text, updatedAt = now, reviewStage = -1, nextReview = now + 24L * 60L * 60L * 1000L)
+                    val newId = withContext(Dispatchers.IO) { dao.saveNote(draft) }
+                    current = draft.copy(noteId = newId)
+                    onSaved()
+                    onBack()
+                }
+            },
+            enabled = loaded && text.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+            shape = RoundedCornerShape(17.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Green)
+        ) { Text("保存并返回") }
+    }
+}
 @Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=22.dp,bottom=16.dp)){Text(title,fontSize=24.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=14.sp,lineHeight=20.sp,color=Muted,modifier=Modifier.padding(top=6.dp))}}
 
 @Composable
