@@ -338,6 +338,8 @@ interface UserDao {
     }
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveNote(note: UserNote): Long
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
+    @Query("SELECT * FROM user_notes ORDER BY updated_at DESC") suspend fun allNotes(): List<UserNote>
+    @Query("SELECT * FROM user_notes WHERE noteId=:noteId LIMIT 1") suspend fun noteById(noteId: Long): UserNote?
 }
 
 @Database(entities = [UserWordStatus::class,UserNote::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class],version = 7,exportSchema = false)
