@@ -708,7 +708,9 @@ private fun DailyReviewScreen(
 @Composable
 private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBack:()->Unit,onComplete:()->Unit) {
     var revealed by remember(note.noteId) { mutableStateOf(false) }
+    var noteHighlights by remember(note.noteId) { mutableStateOf(emptyList<UserNoteHighlight>()) }
     var saving by remember { mutableStateOf(false) }
+    LaunchedEffect(note.noteId) { noteHighlights=withContext(Dispatchers.IO){dao.noteHighlights(note.noteId)} }
     val scope=rememberCoroutineScope()
     Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
         TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
@@ -716,7 +718,8 @@ private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBa
         Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(24.dp)) {
             Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                 Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
-                Text(if(revealed) note.content else "点卡片空白处查看笔记",fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                if(revealed) Text(highlightedNoteContent(note.content,noteHighlights),fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                else Text("点卡片空白处查看笔记",fontSize=15.sp,lineHeight=24.sp,color=Ink)
             }
         }
         if(revealed) {
