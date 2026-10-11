@@ -38,14 +38,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TextRange
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.cet6.study.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -353,10 +358,7 @@ private fun Cet6StudyApp() {
                 )
             }
             noteTarget?.let { target ->
-                Dialog(
-                    onDismissRequest = { noteTarget = null; scope.launch { refreshCounts() } },
-                    properties = DialogProperties(usePlatformDefaultWidth = false)
-                ) {
+                Box(Modifier.fillMaxSize().background(AppBg)) {
                     NotesScreen(
                         target = target,
                         dao = dao,
@@ -764,7 +766,9 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
         lookupAlreadyAdded=wordId in todayAddedWordIds
     }
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
-    var selectedId by remember { mutableStateOf("") }
+    val context=LocalContext.current
+    val paperPrefs=remember(context){context.getSharedPreferences("last_paper_selection",android.content.Context.MODE_PRIVATE)}
+    val (selectedId,selectPaper)=rememberSelectedPaperId("reading",papers,paperPrefs)
     var selectedType by remember { mutableStateOf("") }
     var readingTypes by remember { mutableStateOf(emptyList<String>()) }
     var sentences by remember { mutableStateOf(emptyList<ReadingSentence>()) }
@@ -778,7 +782,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
     var inReader by remember { mutableStateOf(false) }
     var revealed by remember(selectedId,selectedType,selectedPassage,sentenceIndex) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
-    LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")}; if(papers.isNotEmpty()) selectedId=papers.first().paperId }
+    LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")} }
     LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) { readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}; selectedType=readingTypes.firstOrNull().orEmpty() } }
     LaunchedEffect(selectedId,selectedType) {
         if(selectedId.isNotBlank() && selectedType.isNotBlank()) {
@@ -803,7 +807,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
     if(!inReader) {
         Column(Modifier.fillMaxSize().padding(horizontal=18.dp)) {
             ScreenHeading("阅读精读", "逐句精读；长按任意文字范围可记笔记")
-            PaperSelector(papers,selectedId,{selectedId=it})
+            PaperSelector(papers,selectedId,selectPaper)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
             Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
@@ -1294,14 +1298,16 @@ private fun highlightedText(text:String,json:String,sourceText:String=text):andr
 
 @Composable
 private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit,onWordLookup:(String)->Unit) {
-    var papers by remember { mutableStateOf(emptyList<PaperCard>()) };var selectedId by remember { mutableStateOf("") };var rows by remember { mutableStateOf(emptyList<TranslationItem>()) }
+    val context=LocalContext.current
+    val paperPrefs=remember(context){context.getSharedPreferences("last_paper_selection",android.content.Context.MODE_PRIVATE)}
+    var papers by remember { mutableStateOf(emptyList<PaperCard>()) };val (selectedId,selectPaper)=rememberSelectedPaperId("translation",papers,paperPrefs);var rows by remember { mutableStateOf(emptyList<TranslationItem>()) }
     var index by remember(selectedId) { mutableIntStateOf(0) }
     var revealed by remember(selectedId,index) { mutableStateOf(false) }
-    LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("translation")};if(papers.isNotEmpty())selectedId=papers.first().paperId}
+    LaunchedEffect(Unit){papers=withContext(Dispatchers.IO){repo.getPapers("translation")}}
     LaunchedEffect(selectedId){if(selectedId.isNotBlank()){rows=withContext(Dispatchers.IO){repo.getTranslations(selectedId)};index=0}}
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("翻译训练","先自己翻译，点卡片后查看参考译文和优化译文")
-        PaperSelector(papers,selectedId,{selectedId=it})
+        PaperSelector(papers,selectedId,selectPaper)
         val item=rows.getOrNull(index)
         if(item!=null) {
             Text("第 ${index+1} / ${rows.size} 句",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
@@ -1328,8 +1334,10 @@ private fun TranslationScreen(repo:ContentDb,onNote:(NoteTarget)->Unit,onWordLoo
 
 @Composable
 private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,onWordLookup:(String)->Unit) {
+    val context=LocalContext.current
+    val paperPrefs=remember(context){context.getSharedPreferences("last_paper_selection",android.content.Context.MODE_PRIVATE)}
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
-    var selectedId by remember { mutableStateOf("") }
+    val (selectedId,selectPaper)=rememberSelectedPaperId("writing",papers,paperPrefs)
     var item by remember { mutableStateOf<WritingItem?>(null) }
     var userHighlights by remember { mutableStateOf<Map<Long,List<UserWritingHighlight>>>(emptyMap()) }
     var userTextOverrides by remember { mutableStateOf<Map<Long,String>>(emptyMap()) }
@@ -1339,7 +1347,6 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,o
 
     LaunchedEffect(Unit) {
         papers=withContext(Dispatchers.IO){repo.getPapers("writing")}
-        if(papers.isNotEmpty()) selectedId=papers.first().paperId
     }
     LaunchedEffect(selectedId) {
         if(selectedId.isNotBlank()) item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}
@@ -1359,7 +1366,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,o
 
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("作文积累","长按选择好词好句，可记笔记或标黄；点“编辑换行”可自行调整段落")
-        PaperSelector(papers,selectedId,{selectedId=it})
+        PaperSelector(papers,selectedId,selectPaper)
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             item {
@@ -1467,8 +1474,11 @@ private fun resolveUserHighlightRanges(text:String,highlights:List<UserWritingHi
 @Composable
 private fun AllNotesScreen(dao: UserDao, refreshToken: Int, onBack: () -> Unit, onOpenNote: (UserNote) -> Unit) {
     var notes by remember { mutableStateOf(emptyList<UserNote>()) }
+    var highlights by remember { mutableStateOf(emptyMap<Long, List<UserNoteHighlight>>()) }
     LaunchedEffect(refreshToken) {
-        notes = withContext(Dispatchers.IO) { dao.allNotes() }
+        val loaded = withContext(Dispatchers.IO) { dao.allNotes() to dao.allNoteHighlights() }
+        notes = loaded.first
+        highlights = loaded.second.groupBy { it.noteId }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1496,7 +1506,7 @@ private fun AllNotesScreen(dao: UserDao, refreshToken: Int, onBack: () -> Unit, 
                             if (note.sourceText.isNotBlank()) {
                                 Text(note.sourceText, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
-                            Text(note.content, color = Ink, fontSize = 15.sp, lineHeight = 22.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                            Text(highlightedNoteContent(note.content, highlights[note.noteId].orEmpty()), color = Ink, fontSize = 15.sp, lineHeight = 22.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
                             Text("点击查看或继续编辑", color = Muted, fontSize = 11.sp)
                         }
                     }
@@ -1514,20 +1524,53 @@ private fun noteTypeLabel(type: String): String = when (type) {
     else -> "学习笔记"
 }
 
+private fun resolveNoteHighlightRanges(text: String, highlights: List<UserNoteHighlight>): List<IntRange> =
+    highlights.mapNotNull { highlight ->
+        val selected = highlight.selectedText
+        if (selected.isEmpty()) return@mapNotNull null
+        val storedStart = highlight.startOffset
+        val directMatch = storedStart >= 0 && storedStart + selected.length <= text.length &&
+            text.substring(storedStart, storedStart + selected.length) == selected
+        val start = if (directMatch) storedStart else {
+            val candidates = generateSequence(text.indexOf(selected)) { previous ->
+                val next = text.indexOf(selected, previous + 1)
+                if (next >= 0) next else null
+            }.toList()
+            candidates.minByOrNull { kotlin.math.abs(it - storedStart) } ?: -1
+        }
+        if (start >= 0 && start + selected.length <= text.length) start until (start + selected.length) else null
+    }
+
+private fun highlightedNoteContent(text: String, highlights: List<UserNoteHighlight>) = buildAnnotatedString {
+    append(text)
+    resolveNoteHighlightRanges(text, highlights).forEach { range ->
+        addStyle(SpanStyle(background = PaleYellow), range.first, range.last + 1)
+    }
+}
+
 @Composable
 private fun NotesScreen(target: NoteTarget, dao: UserDao, onBack: () -> Unit, onSaved: () -> Unit) {
-    var text by remember(target) { mutableStateOf("") }
+    var value by remember(target) { mutableStateOf(TextFieldValue("")) }
     var loaded by remember(target) { mutableStateOf(false) }
     var current by remember(target) { mutableStateOf<UserNote?>(null) }
+    var highlights by remember(target) { mutableStateOf(emptyList<UserNoteHighlight>()) }
     val scope = rememberCoroutineScope()
     LaunchedEffect(target) {
         current = withContext(Dispatchers.IO) {
             target.existingNoteId?.let { dao.noteById(it) }
                 ?: dao.notes(target.type, target.id).firstOrNull { it.sourceText == target.sourceText }
         }
-        text = current?.content.orEmpty()
+        value = TextFieldValue(current?.content.orEmpty())
+        highlights = current?.let { withContext(Dispatchers.IO) { dao.noteHighlights(it.noteId) } }.orEmpty()
         loaded = true
     }
+    val visualTransformation = remember(highlights) {
+        VisualTransformation { input ->
+            TransformedText(highlightedNoteContent(input.text, highlights), OffsetMapping.Identity)
+        }
+    }
+    val selectionStart = minOf(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
+    val selectionEnd = maxOf(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
     Column(
         Modifier.fillMaxSize().background(AppBg).imePadding().padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
@@ -1554,35 +1597,72 @@ private fun NotesScreen(target: NoteTarget, dao: UserDao, onBack: () -> Unit, on
                 )
             }
         }
+        if (selectionEnd > selectionStart) {
+            TextButton(
+                onClick = {
+                    val selected = value.text.substring(selectionStart, selectionEnd)
+                    if (selected.isNotBlank() && highlights.none { it.startOffset == selectionStart && it.endOffset == selectionEnd && it.selectedText == selected }) {
+                        highlights = highlights + UserNoteHighlight(
+                            noteId = current?.noteId ?: 0L,
+                            startOffset = selectionStart,
+                            endOffset = selectionEnd,
+                            selectedText = selected
+                        )
+                    }
+                    value = value.copy(selection = TextRange(selectionEnd))
+                },
+                enabled = loaded
+            ) { Text("标黄选中内容", color = Green) }
+        }
         OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 12.dp),
-            placeholder = { Text("写下释义、表达用法或自己的理解") },
+            value = value,
+            onValueChange = { value = it },
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
+            placeholder = { Text("写下释义、表达用法或自己的理解；选中文字后可标黄") },
             shape = RoundedCornerShape(20.dp),
-            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Green)
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Green),
+            visualTransformation = visualTransformation
         )
         Button(
             onClick = {
                 scope.launch {
                     val now = System.currentTimeMillis()
                     val old = current
-                    val draft = old?.copy(content = text, updatedAt = now)
-                        ?: UserNote(itemType = target.type, itemId = target.id, sourceText = target.sourceText, content = text, updatedAt = now, reviewStage = -1, nextReview = now + 24L * 60L * 60L * 1000L)
-                    val newId = withContext(Dispatchers.IO) { dao.saveNote(draft) }
-                    current = draft.copy(noteId = newId)
+                    val draft = old?.copy(content = value.text, updatedAt = now)
+                        ?: UserNote(itemType = target.type, itemId = target.id, sourceText = target.sourceText, content = value.text, updatedAt = now, reviewStage = -1, nextReview = now + 24L * 60L * 60L * 1000L)
+                    val savedId = withContext(Dispatchers.IO) { dao.saveNote(draft) }
+                    val savedHighlights = highlights.map { it.copy(highlightId = 0, noteId = savedId) }
+                    withContext(Dispatchers.IO) { dao.replaceNoteHighlights(savedId, savedHighlights) }
+                    current = draft.copy(noteId = savedId)
                     onSaved()
                     onBack()
                 }
             },
-            enabled = loaded && text.isNotBlank(),
+            enabled = loaded && value.text.isNotBlank(),
             modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
             shape = RoundedCornerShape(17.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Green)
         ) { Text("保存并返回") }
     }
 }
+
 @Composable private fun ScreenHeading(title:String,subtitle:String){Column(Modifier.padding(top=22.dp,bottom=16.dp)){Text(title,fontSize=24.sp,fontWeight=FontWeight.Bold,color=Ink);Text(subtitle,fontSize=14.sp,lineHeight=20.sp,color=Muted,modifier=Modifier.padding(top=6.dp))}}
+
+@Composable
+private fun rememberSelectedPaperId(module: String, papers: List<PaperCard>, prefs: android.content.SharedPreferences): Pair<String, (String) -> Unit> {
+    var selectedId by remember(module) { mutableStateOf("") }
+    LaunchedEffect(module, papers) {
+        val saved = prefs.getString("paper_$module", null)
+        selectedId = papers.firstOrNull { it.paperId == saved }?.paperId
+            ?: papers.firstOrNull()?.paperId.orEmpty()
+        if (selectedId.isNotBlank()) prefs.edit().putString("paper_$module", selectedId).apply()
+    }
+    val selectPaper: (String) -> Unit = { paperId ->
+        selectedId = paperId
+        prefs.edit().putString("paper_$module", paperId).apply()
+    }
+    return selectedId to selectPaper
+}
 
 @Composable
 private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(String)->Unit) {
