@@ -127,6 +127,16 @@ class ContentDb private constructor(context: Context) {
         return word.copy(senses = senses)
     }
 
+    fun getExcellentWritingPaperIds(): Set<String> = database.rawQuery("""
+        SELECT DISTINCT p.paper_id
+        FROM papers p
+        JOIN content_units u ON u.paper_id=p.paper_id AND u.module='writing'
+        JOIN writing_samples s ON s.prompt_unit_id=u.unit_id
+        WHERE s.sample_type='excellent'
+    """.trimIndent(), emptyArray<String>()).use { c ->
+        buildSet { while(c.moveToNext()) add(c.getString(0)) }
+    }
+
     fun getPapers(module: String): List<PaperCard> {
         val sql = """
             SELECT p.paper_id,p.year,p.month,p.set_no,p.reading_source_paper_id,
@@ -253,7 +263,22 @@ data class UserWordStatus(
     @androidx.room.ColumnInfo(name="last_reviewed") val lastReviewed: Long,
     @androidx.room.ColumnInfo(name="review_count") val reviewCount: Int,
     @androidx.room.ColumnInfo(name="review_stage", defaultValue = "0") val reviewStage: Int = 0,
-    @androidx.room.ColumnInfo(name="is_mastered", defaultValue = "0") val isMastered: Boolean = false
+    @androidx.room.ColumnInfo(name="is_mastered", defaultValue = "0") val isMastered: Boolean = false,
+    @androidx.room.ColumnInfo(name="is_learning_complete", defaultValue = "1") val isLearningComplete: Boolean = true
+)
+
+@Entity(tableName = "user_word_folders", indices = [Index(value = ["name"], unique = true)])
+data class UserWordFolder(
+    @PrimaryKey(autoGenerate = true) @androidx.room.ColumnInfo(name = "folder_id") val folderId: Long = 0,
+    val name: String,
+    @androidx.room.ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "user_word_favorites", indices = [Index(value = ["folder_id"])])
+data class UserWordFavorite(
+    @PrimaryKey @androidx.room.ColumnInfo(name = "word_id") val wordId: Int,
+    @androidx.room.ColumnInfo(name = "folder_id") val folderId: Long,
+    @androidx.room.ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "user_reading_status", indices = [Index(value = ["paper_id", "reading_type", "passage_no"])])
@@ -325,10 +350,17 @@ data class UserWritingText(
 @Dao
 interface UserDao {
     @Query("SELECT * FROM user_word_status WHERE word_id=:wordId") suspend fun status(wordId: Int): UserWordStatus?
-    @Query("SELECT * FROM user_word_status WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review") suspend fun dueWordStatuses(now: Long): List<UserWordStatus>
-    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review") suspend fun dueWordIds(now: Long): List<Int>
+    @Query("SELECT * FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review") suspend fun dueWordStatuses(now: Long): List<UserWordStatus>
+    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review") suspend fun dueWordIds(now: Long): List<Int>
     @Query("SELECT word_id FROM user_word_status") suspend fun studiedWordIds(): List<Int>
-    @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now AND is_mastered=0") suspend fun dueCount(now: Long): Int
+    @Query("SELECT word_id FROM user_word_status WHERE is_learning_complete=0 AND is_mastered=0 ORDER BY last_reviewed,word_id") suspend fun incompleteWordIds(): List<Int>
+    @Query("SELECT * FROM user_word_folders ORDER BY created_at,folder_id") suspend fun wordFolders(): List<UserWordFolder>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertWordFolder(folder: UserWordFolder): Long
+    @Query("SELECT * FROM user_word_favorites WHERE word_id=:wordId LIMIT 1") suspend fun wordFavorite(wordId: Int): UserWordFavorite?
+    @Query("SELECT * FROM user_word_favorites WHERE folder_id=:folderId ORDER BY created_at DESC,word_id") suspend fun wordFavorites(folderId: Long): List<UserWordFavorite>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWordFavorite(favorite: UserWordFavorite)
+    @Query("DELETE FROM user_word_favorites WHERE word_id=:wordId") suspend fun removeWordFavorite(wordId: Int)
+    @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1") suspend fun dueCount(now: Long): Int
     @Query("SELECT COUNT(*) FROM user_word_status") suspend fun studiedCount(): Int
     @Query("SELECT * FROM user_reading_status WHERE paper_id=:paperId AND reading_type=:readingType") suspend fun readingStatuses(paperId: String, readingType: String): List<UserReadingStatus>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveReadingStatus(status: UserReadingStatus)
@@ -360,7 +392,7 @@ interface UserDao {
     }
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class],version = 8,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class],version = 9,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -461,9 +493,31 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_word_status ADD COLUMN is_learning_complete INTEGER NOT NULL DEFAULT 1")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_word_folders (
+                        folder_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        created_at INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_user_word_folders_name ON user_word_folders(name)")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_word_favorites (
+                        word_id INTEGER NOT NULL PRIMARY KEY,
+                        folder_id INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_word_favorites_folder_id ON user_word_favorites(folder_id)")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build().also { instance=it }
         }
     }
