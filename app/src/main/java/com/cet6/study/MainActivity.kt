@@ -17,6 +17,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -84,7 +85,7 @@ private fun Cet6StudyTheme(content: @Composable () -> Unit) {
 }
 
 private enum class Page(val title: String) { HOME("首页"), WORDS("单词"), READING("阅读"), TRANSLATION("翻译"), WRITING("作文"), NOTE_REVIEW("笔记复习"), ALL_NOTES("全部笔记") }
-private enum class WordListMode { NEW, REVIEW, ALL }
+private enum class WordListMode { NEW, REVIEW, ALL, FAVORITES }
 private data class NoteTarget(val type: String, val id: Int, val title: String, val sourceText: String = "", val storageType: String = type, val existingNoteId: Long? = null)
 private sealed class ReviewQueueEntry {
     abstract val dueAt: Long
@@ -103,7 +104,7 @@ private fun Cet6StudyApp() {
     var page by remember { mutableStateOf(Page.HOME) }
     var selectedWordId by remember { mutableStateOf<Int?>(null) }
     var wordQueue by remember { mutableStateOf(emptyList<Int>()) }
-    var ratedWordIds by remember { mutableStateOf(emptySet<Int>()) }
+    var wordLearningSession by remember { mutableStateOf(false) }
     var wordListMode by remember { mutableStateOf(WordListMode.NEW) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var allNotesRefresh by remember { mutableIntStateOf(0) }
@@ -239,23 +240,24 @@ private fun Cet6StudyApp() {
                     repo = repo,
                     dao = dao,
                     onWordLookup = ::lookupSelectedText,
+                    isLearningSession = wordLearningSession,
                     onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
-                    onRated = { wasNew ->
-                        if (wasNew) {
-                            newDoneToday += 1
-                            goalPrefs.edit().putInt("new_done", newDoneToday).apply()
+                    onRated = { completedNewWord ->
+                        if (wordLearningSession) {
+                            if (completedNewWord) {
+                                newDoneToday += 1
+                                goalPrefs.edit().putInt("new_done", newDoneToday).apply()
+                            }
                         } else {
                             reviewDoneToday += 1
                             goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
                         }
                         val currentId = selectedWordId
                         if (currentId != null) {
-                            val completedIds = ratedWordIds + currentId
-                            ratedWordIds = completedIds
-                            val nextId = wordQueue.dropWhile { it != currentId }
-                                .drop(1)
-                                .firstOrNull { it !in completedIds }
-                            selectedWordId = nextId
+                            val remaining = wordQueue.dropWhile { it != currentId }.drop(1)
+                            val retryAfterOtherWords = wordLearningSession && !completedNewWord
+                            wordQueue = remaining + if (retryAfterOtherWords) listOf(currentId) else emptyList()
+                            selectedWordId = wordQueue.firstOrNull()
                         }
                         scope.launch { refreshCounts() }
                     }
@@ -273,8 +275,8 @@ private fun Cet6StudyApp() {
                             goalPrefs.edit().putInt("new_goal", newValue).apply()
                         })
                     Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { wordListMode = it }, onWord = { id, queue ->
-                        wordQueue = queue
-                        ratedWordIds = emptySet()
+                        wordQueue = queue.dropWhile { it != id }
+                        wordLearningSession = wordListMode == WordListMode.NEW
                         selectedWordId = id
                     })
                     Page.READING -> ReadingScreen(
@@ -498,30 +500,76 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
     var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
+    var folders by remember { mutableStateOf(emptyList<UserWordFolder>()) }
+    var selectedFolderId by remember { mutableStateOf<Long?>(null) }
+    var favoriteIds by remember { mutableStateOf(emptyList<Int>()) }
+    var folderMenuExpanded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        folders=withContext(Dispatchers.IO) {
+            if(dao.wordFolders().isEmpty()) dao.insertWordFolder(UserWordFolder(name="默认收藏"))
+            dao.wordFolders()
+        }
+        if(selectedFolderId==null) selectedFolderId=folders.firstOrNull()?.folderId
+    }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
     LaunchedEffect(mode,newGoal,newDone,addedWordIds) {
         withContext(Dispatchers.IO) {
-            val newRemaining=(newGoal-newDone).coerceAtLeast(0)
-            dueIds=dao.dueWordIds(System.currentTimeMillis())
+            val pending=dao.incompleteWordIds()
             val seen=dao.studiedWordIds().toSet()
-            val planned=repo.getNewWordIds(newRemaining,seen)
-            val manuallyAdded=addedWordIds.filter { it !in seen }
-            newIds=(planned+manuallyAdded).distinct()
+            dueIds=dao.dueWordIds(System.currentTimeMillis())
+            val newRemaining=(newGoal-newDone).coerceAtLeast(0)
+            val manuallyAdded=addedWordIds.filter { it !in seen && it !in pending }
+            val freshNeeded=(newRemaining-pending.size-manuallyAdded.size).coerceAtLeast(0)
+            val planned=repo.getNewWordIds(freshNeeded,seen)
+            newIds=(planned+manuallyAdded+pending).distinct()
         }
+    }
+    LaunchedEffect(selectedFolderId) {
+        favoriteIds=selectedFolderId?.let { folderId ->
+            withContext(Dispatchers.IO) { dao.wordFavorites(folderId).map { it.wordId } }
+        }.orEmpty()
     }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("单词", "按最终背诵顺序浏览，例句不足的词会标出")
         OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
-        Row(Modifier.padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
             FilterChip(selected=mode==WordListMode.REVIEW,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
             FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.FAVORITES,onClick={onMode(WordListMode.FAVORITES)},label={Text("收藏 ${favoriteIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow))
         }
-        val plannedIds=when(mode){WordListMode.NEW->newIds;WordListMode.REVIEW->dueIds;WordListMode.ALL->emptyList()}
+        if(mode==WordListMode.FAVORITES) {
+            Box {
+                OutlinedButton(onClick={folderMenuExpanded=true},shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green)) {
+                    Text(folders.firstOrNull{it.folderId==selectedFolderId}?.name ?: "选择收藏夹")
+                    Text("  ⌄")
+                }
+                DropdownMenu(expanded=folderMenuExpanded,onDismissRequest={folderMenuExpanded=false}) {
+                    folders.forEach { folder ->
+                        DropdownMenuItem(text={Text(folder.name)},onClick={selectedFolderId=folder.folderId;folderMenuExpanded=false})
+                    }
+                }
+            }
+        }
+        val plannedIds=when(mode){
+            WordListMode.NEW->newIds
+            WordListMode.REVIEW->dueIds
+            WordListMode.ALL->emptyList()
+            WordListMode.FAVORITES->favoriteIds
+        }
         val wordsById=words.associateBy { it.wordId }
         val visibleWords=if(mode!=WordListMode.ALL) plannedIds.mapNotNull { wordsById[it] } else words
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            if(visibleWords.isEmpty()) item { Text(if(mode!=WordListMode.ALL && search.isBlank()) if(mode==WordListMode.REVIEW) "当前没有到期复习的单词。" else "新词已学完。" else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
+            if(visibleWords.isEmpty()) item {
+                val message=when(mode) {
+                    WordListMode.REVIEW -> "当前没有到期复习的单词。"
+                    WordListMode.NEW -> "新词已学完。"
+                    WordListMode.FAVORITES -> "这个收藏夹还没有单词。"
+                    WordListMode.ALL -> "没有找到匹配的单词。"
+                }
+                Text(if(search.isBlank() || mode==WordListMode.NEW || mode==WordListMode.REVIEW || mode==WordListMode.FAVORITES) message else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp))
+            }
             items(visibleWords,key={it.wordId}) { word ->
                 Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -536,25 +584,40 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
 }
 
 @Composable
-private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onWordLookup:(String)->Unit = {},onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null) {
+private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,dao:UserDao,onWordLookup:(String)->Unit = {},onBack:()->Unit,onRated:(Boolean)->Unit,onMastered:(()->Unit)?=null,isLearningSession:Boolean=false) {
     var detail by remember(wordId) { mutableStateOf<WordDetail?>(null) }
     var currentStatus by remember(wordId) { mutableStateOf<UserWordStatus?>(null) }
+    var folders by remember(wordId) { mutableStateOf(emptyList<UserWordFolder>()) }
+    var currentFavorite by remember(wordId) { mutableStateOf<UserWordFavorite?>(null) }
+    var showFavoriteDialog by remember { mutableStateOf(false) }
+    var newFolderName by remember { mutableStateOf("") }
     var saving by remember(wordId) { mutableStateOf(false) }
     var revealed by remember(wordId) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
-    LaunchedEffect(wordId) { withContext(Dispatchers.IO) { detail=repo.getWord(wordId); currentStatus=dao.status(wordId) } }
+    LaunchedEffect(wordId) {
+        withContext(Dispatchers.IO) {
+            detail=repo.getWord(wordId)
+            currentStatus=dao.status(wordId)
+            if(dao.wordFolders().isEmpty()) dao.insertWordFolder(UserWordFolder(name="默认收藏"))
+            folders=dao.wordFolders()
+            currentFavorite=dao.wordFavorite(wordId)
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             title={Text("单词详情")},
             navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},
-            actions={ if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text("彻底熟悉",color=Green)} },
+            actions={
+                TextButton(enabled=!saving,onClick={showFavoriteDialog=true}){Text(if(currentFavorite!=null) "★ 已收藏" else "☆ 收藏",color=Green)}
+                if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text("彻底熟悉",color=Green)}
+            },
             colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg)
         )
         val w=detail
         if(w==null) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Green)} else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp),contentPadding=PaddingValues(bottom=28.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 item {
-                    Text("${if(progress.second>0) "${progress.first} / ${progress.second} · " else ""}${if(currentStatus==null) "新词学习" else "今日复习"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=4.dp))
+                    Text("${if(progress.second>0) "${progress.first} / ${progress.second} · " else ""}${if(isLearningSession || currentStatus==null) "新词学习" else "今日复习"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=4.dp))
                     Card(Modifier.fillMaxWidth().clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=PaleGreen),shape=RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         Text("第 ${w.rank} 位 · ${w.level}",color=Muted,fontSize=12.sp)
                         Text(w.lemma,color=DarkGreen,fontSize=36.sp,fontWeight=FontWeight.Bold)
@@ -586,14 +649,14 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                 }
                 if(revealed) item {
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text("选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    Text(if(isLearningSession) "选择“熟悉”才计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
                         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
-                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
-                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,{saving=true}) { onRated(currentStatus == null) } }
+                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> onRated(completedNew) } }
+                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> onRated(completedNew) } }
+                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> onRated(completedNew) } }
                         }
                         currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                     }
@@ -601,20 +664,88 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
             }
         }
     }
+    val favoriteWord=detail
+    if(showFavoriteDialog && favoriteWord!=null) {
+        AlertDialog(
+            onDismissRequest={showFavoriteDialog=false},
+            title={Text("收藏「${favoriteWord.lemma}」",color=DarkGreen)},
+            text={
+                Column(Modifier.heightIn(max=380.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                    Text("选择一个收藏夹，也可以新建分类。",fontSize=13.sp,color=Muted)
+                    folders.forEach { folder ->
+                        TextButton(onClick={
+                            scope.launch {
+                                withContext(Dispatchers.IO) { dao.saveWordFavorite(UserWordFavorite(favoriteWord.wordId,folder.folderId)) }
+                                currentFavorite=withContext(Dispatchers.IO) { dao.wordFavorite(favoriteWord.wordId) }
+                                showFavoriteDialog=false
+                            }
+                        },modifier=Modifier.fillMaxWidth()) {
+                            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                                Text(folder.name,color=Ink)
+                                Text(if(currentFavorite?.folderId==folder.folderId) "当前收藏" else "收藏到这里",color=Green,fontSize=12.sp)
+                            }
+                        }
+                    }
+                    OutlinedTextField(value=newFolderName,onValueChange={newFolderName=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("新收藏夹名称")})
+                }
+            },
+            confirmButton={
+                TextButton(onClick={
+                    val name=newFolderName.trim()
+                    if(name.isNotEmpty()) scope.launch {
+                        val folderId=withContext(Dispatchers.IO) {
+                            val inserted=dao.insertWordFolder(UserWordFolder(name=name))
+                            val resolved=if(inserted>0) inserted else dao.wordFolders().firstOrNull{it.name==name}?.folderId ?: 0L
+                            if(resolved>0) dao.saveWordFavorite(UserWordFavorite(favoriteWord.wordId,resolved))
+                            resolved
+                        }
+                        folders=withContext(Dispatchers.IO) { dao.wordFolders() }
+                        currentFavorite=withContext(Dispatchers.IO) { dao.wordFavorite(favoriteWord.wordId) }
+                        newFolderName=""
+                        showFavoriteDialog=false
+                    }
+                }){Text("新建并收藏",color=Green)}
+            },
+            dismissButton={
+                Row {
+                    if(currentFavorite!=null) TextButton(onClick={
+                        scope.launch {
+                            withContext(Dispatchers.IO) { dao.removeWordFavorite(favoriteWord.wordId) }
+                            currentFavorite=null
+                            showFavoriteDialog=false
+                        }
+                    }){Text("取消收藏",color=Color(0xFFB15C4B))}
+                    TextButton(onClick={showFavoriteDialog=false}){Text("关闭",color=Muted)}
+                }
+            }
+        )
+    }
 }
 
-private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.CoroutineScope,onStart:()->Unit,onComplete:()->Unit) {
+private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.CoroutineScope,isLearningSession:Boolean,onStart:()->Unit,onComplete:(Boolean)->Unit) {
     onStart()
     scope.launch(Dispatchers.IO) {
         val old=dao.status(wordId)
         val now=System.currentTimeMillis()
         val stageBefore=old?.reviewStage ?: -1
-        val schedule=scheduleNextReview(value,stageBefore,now)
+        val isUnfinishedLearning=isLearningSession && old?.isLearningComplete!=true
+        val completesNewWord=isUnfinishedLearning && value=="熟悉"
+        val schedule=if(isUnfinishedLearning) scheduleNextReview("不会",-1,now) else scheduleNextReview(value,stageBefore,now)
+        val isLearningComplete=if(isLearningSession) old?.isLearningComplete==true || value=="熟悉" else old?.isLearningComplete ?: true
         dao.recordReview(
-            UserWordStatus(wordId,value,schedule.nextReviewMillis,now,(old?.reviewCount ?: 0)+1,schedule.stage),
+            UserWordStatus(
+                wordId=wordId,
+                familiarity=value,
+                nextReview=schedule.nextReviewMillis,
+                lastReviewed=now,
+                reviewCount=(old?.reviewCount ?: 0)+1,
+                reviewStage=schedule.stage,
+                isMastered=old?.isMastered ?: false,
+                isLearningComplete=isLearningComplete
+            ),
             UserReviewHistory(wordId=wordId,reviewedAt=now,familiarity=value,stageBefore=stageBefore,stageAfter=schedule.stage,intervalDays=schedule.intervalDays)
         )
-        withContext(Dispatchers.Main) { onComplete() }
+        withContext(Dispatchers.Main) { onComplete(completesNewWord) }
     }
 }
 
@@ -1340,6 +1471,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,o
     val context=LocalContext.current
     val paperPrefs=remember(context){context.getSharedPreferences("last_paper_selection",android.content.Context.MODE_PRIVATE)}
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
+    var excellentPaperIds by remember { mutableStateOf(emptySet<String>()) }
     val (selectedId,selectPaper)=rememberSelectedPaperId("writing",papers,paperPrefs)
     var item by remember { mutableStateOf<WritingItem?>(null) }
     var userHighlights by remember { mutableStateOf<Map<Long,List<UserWritingHighlight>>>(emptyMap()) }
@@ -1350,6 +1482,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,o
 
     LaunchedEffect(Unit) {
         papers=withContext(Dispatchers.IO){repo.getPapers("writing")}
+        excellentPaperIds=withContext(Dispatchers.IO){repo.getExcellentWritingPaperIds()}
     }
     LaunchedEffect(selectedId) {
         if(selectedId.isNotBlank()) item=withContext(Dispatchers.IO){repo.getWriting(selectedId)}
@@ -1369,7 +1502,7 @@ private fun WritingScreen(repo:ContentDb,dao:UserDao,onNote:(NoteTarget)->Unit,o
 
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("作文积累","长按选择好词好句，可记笔记或标黄；点“编辑换行”可自行调整段落")
-        PaperSelector(papers,selectedId,selectPaper)
+        PaperSelector(papers,selectedId,selectPaper,excellentPaperIds)
         val current=item
         if(current!=null) LazyColumn(contentPadding=PaddingValues(top=10.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             item {
@@ -1668,13 +1801,28 @@ private fun rememberSelectedPaperId(module: String, papers: List<PaperCard>, pre
 }
 
 @Composable
-private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(String)->Unit) {
+private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(String)->Unit,highlightedPaperIds:Set<String> = emptySet()) {
     var expanded by remember { mutableStateOf(false) }
     val current=papers.firstOrNull{it.paperId==selectedId}
     Box {
-        OutlinedButton(onClick={expanded=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Ink)) { Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(current?.title ?: "选择试卷");Text("⌄",color=Green)} }
+        OutlinedButton(onClick={expanded=true},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Ink)) {
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                Text(current?.let { it.title + if(it.paperId in highlightedPaperIds) " · 有优秀范文" else "" } ?: "选择试卷",maxLines=1,overflow=TextOverflow.Ellipsis)
+                Text("⌄",color=Green)
+            }
+        }
         DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=420.dp).background(Color.White)) {
-            papers.forEach{paper-> DropdownMenuItem(text={Text(paper.title)},onClick={onSelect(paper.paperId);expanded=false}) }
+            papers.forEach{paper->
+                DropdownMenuItem(
+                    text={
+                        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            Text(paper.title)
+                            if(paper.paperId in highlightedPaperIds) Text("有优秀范文",fontSize=11.sp,color=Green,modifier=Modifier.clip(RoundedCornerShape(8.dp)).background(PaleGreen).padding(horizontal=7.dp,vertical=3.dp))
+                        }
+                    },
+                    onClick={onSelect(paper.paperId);expanded=false}
+                )
+            }
         }
     }
 }
