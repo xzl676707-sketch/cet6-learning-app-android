@@ -361,7 +361,7 @@ interface UserDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWordFavorite(favorite: UserWordFavorite)
     @Query("DELETE FROM user_word_favorites WHERE word_id=:wordId") suspend fun removeWordFavorite(wordId: Int)
     @Query("SELECT COUNT(*) FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1") suspend fun dueCount(now: Long): Int
-    @Query("SELECT COUNT(*) FROM user_word_status") suspend fun studiedCount(): Int
+    @Query("SELECT COUNT(*) FROM user_word_status WHERE is_learning_complete=1") suspend fun studiedCount(): Int
     @Query("SELECT * FROM user_reading_status WHERE paper_id=:paperId AND reading_type=:readingType") suspend fun readingStatuses(paperId: String, readingType: String): List<UserReadingStatus>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveReadingStatus(status: UserReadingStatus)
     @Query("SELECT * FROM user_writing_highlights WHERE sample_id=:sampleId ORDER BY start_offset,end_offset") suspend fun writingHighlights(sampleId: Long): List<UserWritingHighlight>
