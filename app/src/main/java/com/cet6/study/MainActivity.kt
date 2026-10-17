@@ -265,7 +265,7 @@ private fun Cet6StudyApp() {
                 else -> when(page) {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, todayAddedWordIds.size, newDoneToday, reviewDoneToday,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
-                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.NOTE_REVIEW },
+                        onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
                         onNoteReview = { page = Page.NOTE_REVIEW },
@@ -274,7 +274,7 @@ private fun Cet6StudyApp() {
                             newGoal = newValue
                             goalPrefs.edit().putInt("new_goal", newValue).apply()
                         })
-                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { wordListMode = it }, onReviewSession = { wordListMode = WordListMode.REVIEW; page = Page.NOTE_REVIEW }, onWord = { id, queue ->
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { wordListMode = it }, onWord = { id, queue ->
                         wordQueue = queue.dropWhile { it != id }
                         wordLearningSession = wordListMode == WordListMode.NEW
                         selectedWordId = id
@@ -499,7 +499,7 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,addedWordIds:Set<Int>,onMode:(WordListMode)->Unit,onReviewSession:()->Unit,onWord:(Int,List<Int>)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,addedWordIds:Set<Int>,onMode:(WordListMode)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
     var newIds by remember { mutableStateOf(emptyList<Int>()) }
@@ -539,7 +539,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
         OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=mode==WordListMode.REVIEW,onClick=onReviewSession,label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
+            FilterChip(selected=mode==WordListMode.REVIEW,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
             FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
             FilterChip(selected=mode==WordListMode.FAVORITES,onClick={onMode(WordListMode.FAVORITES)},label={Text("收藏 ${favoriteIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow))
         }
@@ -607,7 +607,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
             currentFavorite=dao.wordFavorite(wordId)
         }
     }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().clickable(enabled=!revealed){revealed=true}) {
         TopAppBar(
             title={Text("单词详情")},
             navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},
