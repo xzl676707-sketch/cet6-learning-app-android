@@ -351,8 +351,8 @@ data class UserWritingText(
 @Dao
 interface UserDao {
     @Query("SELECT * FROM user_word_status WHERE word_id=:wordId") suspend fun status(wordId: Int): UserWordStatus?
-    @Query("SELECT * FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review") suspend fun dueWordStatuses(now: Long): List<UserWordStatus>
-    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review") suspend fun dueWordIds(now: Long): List<Int>
+    @Query("SELECT * FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review,word_id") suspend fun dueWordStatuses(now: Long): List<UserWordStatus>
+    @Query("SELECT word_id FROM user_word_status WHERE next_review<=:now AND is_mastered=0 AND is_learning_complete=1 ORDER BY next_review,word_id") suspend fun dueWordIds(now: Long): List<Int>
     @Query("SELECT word_id FROM user_word_status") suspend fun studiedWordIds(): List<Int>
     @Query("SELECT word_id FROM user_word_status WHERE is_learning_complete=0 AND is_mastered=0 ORDER BY last_reviewed,word_id") suspend fun incompleteWordIds(): List<Int>
     @Query("SELECT * FROM user_word_folders ORDER BY created_at,folder_id") suspend fun wordFolders(): List<UserWordFolder>
@@ -369,7 +369,7 @@ interface UserDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingHighlight(highlight: UserWritingHighlight)
     @Query("SELECT * FROM user_writing_texts WHERE sample_id=:sampleId") suspend fun writingText(sampleId: Long): UserWritingText?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingText(text: UserWritingText)
-    @Query("SELECT * FROM user_notes WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
+    @Query("SELECT * FROM user_notes WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review,noteId") suspend fun dueNotes(now: Long): List<UserNote>
     @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now AND is_mastered=0") suspend fun dueNoteCount(now: Long): Int
     @Query("UPDATE user_notes SET is_mastered=:mastered, next_review=:nextReview WHERE noteId=:noteId") suspend fun setNoteMastered(noteId: Long, mastered: Boolean, nextReview: Long)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
