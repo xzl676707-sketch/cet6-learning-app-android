@@ -317,7 +317,8 @@ data class UserNote(
     @androidx.room.ColumnInfo(name="next_review", defaultValue = "0") val nextReview: Long = 0L,
     @androidx.room.ColumnInfo(name="last_reviewed", defaultValue = "0") val lastReviewed: Long = 0L,
     @androidx.room.ColumnInfo(name="review_count", defaultValue = "0") val reviewCount: Int = 0,
-    @androidx.room.ColumnInfo(defaultValue = "''") val familiarity: String = ""
+    @androidx.room.ColumnInfo(defaultValue = "''") val familiarity: String = "",
+    @androidx.room.ColumnInfo(name="is_mastered", defaultValue = "0") val isMastered: Boolean = false
 )
 
 @Entity(tableName = "user_note_highlights", indices = [Index(value = ["note_id"])])
@@ -368,11 +369,20 @@ interface UserDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingHighlight(highlight: UserWritingHighlight)
     @Query("SELECT * FROM user_writing_texts WHERE sample_id=:sampleId") suspend fun writingText(sampleId: Long): UserWritingText?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveWritingText(text: UserWritingText)
-    @Query("SELECT * FROM user_notes WHERE next_review<=:now ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
-    @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now") suspend fun dueNoteCount(now: Long): Int
+    @Query("SELECT * FROM user_notes WHERE next_review<=:now AND is_mastered=0 ORDER BY next_review,updated_at") suspend fun dueNotes(now: Long): List<UserNote>
+    @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now AND is_mastered=0") suspend fun dueNoteCount(now: Long): Int
+    @Query("UPDATE user_notes SET is_mastered=:mastered, next_review=:nextReview WHERE noteId=:noteId") suspend fun setNoteMastered(noteId: Long, mastered: Boolean, nextReview: Long)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
-    @Query("UPDATE user_word_status SET is_mastered=:mastered, next_review=:nextReview WHERE word_id=:wordId")
+    @Query("UPDATE user_word_status SET is_mastered=:mastered, next_review=:nextReview, is_learning_complete=CASE WHEN :mastered=1 THEN 1 ELSE is_learning_complete END WHERE word_id=:wordId")
     suspend fun setWordMastered(wordId: Int, mastered: Boolean, nextReview: Long)
+    @Transaction suspend fun markWordMastered(wordId: Int, nextReview: Long) {
+        val current = status(wordId)
+        if (current == null) {
+            saveStatus(UserWordStatus(wordId=wordId,familiarity="彻底熟悉",nextReview=nextReview,lastReviewed=System.currentTimeMillis(),reviewCount=1,reviewStage=0,isMastered=true,isLearningComplete=true))
+        } else {
+            setWordMastered(wordId,true,nextReview)
+        }
+    }
     @Insert suspend fun insertReviewHistory(item: UserReviewHistory)
     @Transaction suspend fun recordReview(status: UserWordStatus, history: UserReviewHistory) {
         saveStatus(status)
@@ -392,7 +402,7 @@ interface UserDao {
     }
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class],version = 9,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class],version = 10,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -515,9 +525,15 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE user_notes ADD COLUMN is_mastered INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build().also { instance=it }
         }
     }
