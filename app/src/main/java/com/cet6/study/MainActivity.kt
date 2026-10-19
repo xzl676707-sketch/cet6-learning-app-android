@@ -781,9 +781,9 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
                         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,value) } }
-                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,value) } }
-                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,value) } }
+                            ReviewButton("不会",Modifier.weight(1f),saving){ rate("不会",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,"不会") } }
+                            ReviewButton("有点了解",Modifier.weight(1f),saving){ rate("有点了解",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,"有点了解") } }
+                            ReviewButton("熟悉",Modifier.weight(1f),saving){ rate("熟悉",w.wordId,dao,scope,isLearningSession,{saving=true}) { completedNew -> saving=false; onRated(completedNew,"熟悉") } }
                         }
                         currentStatus?.let { Text("上次选择：${it.familiarity} · 已复习 ${it.reviewCount} 次",color=Muted,fontSize=12.sp,modifier=Modifier.padding(top=6.dp)) }
                     }
