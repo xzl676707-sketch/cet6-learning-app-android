@@ -373,7 +373,7 @@ interface UserDao {
     @Query("SELECT COUNT(*) FROM user_notes WHERE next_review<=:now AND is_mastered=0") suspend fun dueNoteCount(now: Long): Int
     @Query("UPDATE user_notes SET is_mastered=:mastered, next_review=:nextReview WHERE noteId=:noteId") suspend fun setNoteMastered(noteId: Long, mastered: Boolean, nextReview: Long)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveStatus(status: UserWordStatus)
-    @Query("UPDATE user_word_status SET is_mastered=:mastered, next_review=:nextReview, is_learning_complete=CASE WHEN :mastered=1 THEN 1 ELSE is_learning_complete END WHERE word_id=:wordId")
+    @Query("UPDATE user_word_status SET is_mastered=:mastered, familiarity=CASE WHEN :mastered=1 THEN '彻底熟悉' ELSE familiarity END, next_review=:nextReview, is_learning_complete=CASE WHEN :mastered=1 THEN 1 ELSE is_learning_complete END WHERE word_id=:wordId")
     suspend fun setWordMastered(wordId: Int, mastered: Boolean, nextReview: Long)
     @Transaction suspend fun markWordMastered(wordId: Int, nextReview: Long) {
         val current = status(wordId)
