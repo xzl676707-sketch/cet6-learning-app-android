@@ -664,7 +664,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                 }
                 if(revealed) item {
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text(if(isLearningSession) "选择“熟悉”才计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择记忆程度会保存记录；只有点“彻底熟悉”才计入完成并移出今日复习。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    Text(if(isLearningSession) "选择“熟悉”或“彻底熟悉”会计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择记忆程度会保存记录；只有点“彻底熟悉”才计入完成并移出今日复习。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
