@@ -807,8 +807,8 @@ private fun DailyReviewScreen(
             TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
             Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
                 Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text("当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
-                    Text("只有点“彻底熟悉”才会从今日复习中移除。",color=Muted)
+                    Text(if(reviewDoneToday>0) "今日到期内容已全部彻底熟悉" else "当前没有到期的单词或笔记",fontSize=20.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
+                    Text(if(reviewDoneToday>0) "已完成彻底熟悉 $reviewDoneToday 项。" else "只有点“彻底熟悉”才会从今日复习中移除。",color=Muted)
                     Button(onClick=onBack,colors=ButtonDefaults.buttonColors(containerColor=Green)){Text("返回首页")}
                 }
             }
@@ -854,7 +854,14 @@ private fun DailyReviewScreen(
         )
         current is ReviewQueueEntry.Note -> ReviewNoteCard(
             note=current.note, progress=(fixedOrder[key(current)] ?: 1) to originalTotal, dao=dao,
-            onBack={activeEntry=null}, onComplete={activeEntry=null},
+            onBack={activeEntry=null}, onComplete={
+                val reviewedNote=current.note
+                scope.launch {
+                    val updated=withContext(Dispatchers.IO) { dao.noteById(reviewedNote.noteId) }
+                    if(updated!=null) entries=entries.map { entry -> if(entry is ReviewQueueEntry.Note && entry.note.noteId==updated.noteId) ReviewQueueEntry.Note(updated) else entry }
+                    activeEntry=null
+                }
+            },
             onMastered={
                 val masteredEntry=current.note
                 scope.launch {
