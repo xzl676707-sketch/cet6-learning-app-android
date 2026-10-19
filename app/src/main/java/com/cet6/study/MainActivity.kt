@@ -736,7 +736,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
             navigationIcon={TextButton(onClick=onBack){Text("‹ 返回",color=Green)}},
             actions={
                 TextButton(enabled=!saving,onClick={showFavoriteDialog=true}){Text(if(currentFavorite!=null) "★ 已收藏" else "☆ 收藏",color=Green)}
-                if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text("彻底熟悉",color=Green)}
+                if(onMastered!=null && currentStatus?.isMastered!=true) TextButton(enabled=!saving,onClick={saving=true;onMastered()}){Text(if(isLearningSession) "彻底熟悉" else "彻底熟悉 · 移出队列",color=Green)}
             },
             colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg)
         )
@@ -776,7 +776,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                 }
                 if(revealed) item {
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text(if(isLearningSession) "选择“熟悉”或“彻底熟悉”会计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择记忆程度会保存记录；只有点“彻底熟悉”才计入完成并移出今日复习。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    Text(if(isLearningSession) "选择“熟悉”或“彻底熟悉”会计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "点“熟悉”才计入今日复习；“不会/有点了解”会稍后重试，“彻底熟悉”会永久移出队列。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
@@ -900,7 +900,7 @@ private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBa
                 ReviewButton("有点了解",Modifier.weight(1f),saving){ saveNoteRating("有点了解",note,dao,scope,{saving=true}){saving=false;onRated("有点了解")} }
                 ReviewButton("熟悉",Modifier.weight(1f),saving){ saveNoteRating("熟悉",note,dao,scope,{saving=true}){saving=false;onRated("熟悉")} }
             }
-            TextButton(enabled=!saving,onClick={saving=true;onMastered()}) { Text("彻底熟悉 · 完成复习",color=Green) }
+            TextButton(enabled=!saving,onClick={saving=true;onMastered()}) { Text("彻底熟悉 · 移出队列",color=Green) }
         }
         Spacer(Modifier.height(20.dp))
     }
