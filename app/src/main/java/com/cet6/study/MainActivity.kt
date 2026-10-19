@@ -223,6 +223,7 @@ private fun Cet6StudyApp() {
                                         snackbarHostState = snackbarHostState,
                     onWordLookup = ::lookupSelectedText,
                     onBack = { page = Page.HOME; scope.launch { refreshCounts() } },
+                    reviewDoneToday = reviewDoneToday,
                     onReviewDone = {
                         reviewDoneToday += 1
                         goalPrefs.edit().putInt("review_done", reviewDoneToday).apply()
@@ -509,6 +510,7 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 @Composable
 private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,addedWordIds:Set<Int>,onMode:(WordListMode)->Unit,onReview:()->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
+    var dueNoteTotal by remember { mutableIntStateOf(0) }
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
     var newIds by remember { mutableStateOf(emptyList<Int>()) }
     var words by remember { mutableStateOf(emptyList<WordCard>()) }
@@ -530,6 +532,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
             val pending=dao.incompleteWordIds()
             val seen=dao.studiedWordIds().toSet()
             dueIds=dao.dueWordIds(System.currentTimeMillis())
+            dueNoteTotal=dao.dueNoteCount(System.currentTimeMillis())
             val newRemaining=(newGoal-newDone).coerceAtLeast(0)
             val manuallyAdded=addedWordIds.filter { it !in seen && it !in pending }
             val freshNeeded=(newRemaining-pending.size-manuallyAdded.size).coerceAtLeast(0)
@@ -547,7 +550,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
         OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=mode==WordListMode.REVIEW,onClick=onReview,label={Text("复习 ${dueIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
+            FilterChip(selected=mode==WordListMode.REVIEW,onClick=onReview,label={Text("复习 ${dueIds.size+dueNoteTotal}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
             FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
             FilterChip(selected=mode==WordListMode.FAVORITES,onClick={onMode(WordListMode.FAVORITES)},label={Text("收藏 ${favoriteIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow))
         }
@@ -661,7 +664,7 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                 }
                 if(revealed) item {
                     Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text(if(isLearningSession) "选择“熟悉”才计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择后自动进入下一个计划单词；复习时间由应用自动安排。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
+                    Text(if(isLearningSession) "选择“熟悉”才计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "选择记忆程度会保存记录；只有点“彻底熟悉”才计入完成并移出今日复习。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
@@ -764,7 +767,7 @@ private fun rate(value:String,wordId:Int,dao:UserDao,scope:kotlinx.coroutines.Co
 @Composable
 private fun DailyReviewScreen(
     repo:ContentDb, dao:UserDao, snackbarHostState:SnackbarHostState, onWordLookup:(String)->Unit,
-    onBack:()->Unit, onReviewDone:()->Unit, onReviewUndo:()->Unit
+    onBack:()->Unit, reviewDoneToday:Int, onReviewDone:()->Unit, onReviewUndo:()->Unit
 ) {
     var entries by remember { mutableStateOf(emptyList<ReviewQueueEntry>()) }
     var labels by remember { mutableStateOf(emptyMap<String,String>()) }
@@ -793,8 +796,8 @@ private fun DailyReviewScreen(
         }
         entries=loaded.first
         labels=loaded.second
-        originalTotal=loaded.first.size
-        loaded.first.forEachIndexed { index,entry -> fixedOrder[key(entry)]=index+1 }
+        originalTotal=reviewDoneToday+loaded.first.size
+        loaded.first.forEachIndexed { index,entry -> fixedOrder[key(entry)]=reviewDoneToday+index+1 }
         loading=false
     }
     val current=activeEntry
