@@ -321,6 +321,14 @@ data class UserNote(
     @androidx.room.ColumnInfo(name="is_mastered", defaultValue = "0") val isMastered: Boolean = false
 )
 
+@Entity(tableName = "user_review_queue", primaryKeys = ["entry_type", "item_id"], indices = [Index(value = ["queue_order"])])
+data class UserReviewQueueItem(
+    @androidx.room.ColumnInfo(name = "entry_type") val entryType: String,
+    @androidx.room.ColumnInfo(name = "item_id") val itemId: Long,
+    @androidx.room.ColumnInfo(name = "queue_order") val queueOrder: Long,
+    @androidx.room.ColumnInfo(name = "queued_at") val queuedAt: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "user_note_highlights", indices = [Index(value = ["note_id"])])
 data class UserNoteHighlight(
     @PrimaryKey(autoGenerate = true) @androidx.room.ColumnInfo(name = "highlight_id") val highlightId: Long = 0,
@@ -392,6 +400,14 @@ interface UserDao {
     @Query("SELECT * FROM user_notes WHERE item_type=:type AND item_id=:itemId ORDER BY updated_at DESC") suspend fun notes(type: String,itemId: Int): List<UserNote>
     @Query("SELECT * FROM user_notes ORDER BY updated_at DESC") suspend fun allNotes(): List<UserNote>
     @Query("SELECT * FROM user_notes WHERE noteId=:noteId LIMIT 1") suspend fun noteById(noteId: Long): UserNote?
+    @Query("SELECT * FROM user_review_queue ORDER BY queue_order,entry_type,item_id") suspend fun reviewQueueItems(): List<UserReviewQueueItem>
+    @Query("SELECT COALESCE(MAX(queue_order),0) FROM user_review_queue") suspend fun maxReviewQueueOrder(): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun enqueueReviewItems(items: List<UserReviewQueueItem>): List<Long>
+    @Query("DELETE FROM user_review_queue WHERE entry_type=:entryType AND item_id=:itemId") suspend fun removeReviewQueueItem(entryType: String,itemId: Long)
+    @Query("UPDATE user_review_queue SET queue_order=:queueOrder WHERE entry_type=:entryType AND item_id=:itemId") suspend fun setReviewQueueOrder(entryType: String,itemId: Long,queueOrder: Long)
+    @Transaction suspend fun moveReviewQueueItemToEnd(entryType: String,itemId: Long) {
+        setReviewQueueOrder(entryType,itemId,maxReviewQueueOrder()+1)
+    }
     @Query("SELECT * FROM user_note_highlights WHERE note_id=:noteId ORDER BY start_offset,end_offset") suspend fun noteHighlights(noteId: Long): List<UserNoteHighlight>
     @Query("SELECT * FROM user_note_highlights") suspend fun allNoteHighlights(): List<UserNoteHighlight>
     @Query("DELETE FROM user_note_highlights WHERE note_id=:noteId") suspend fun clearNoteHighlights(noteId: Long)
@@ -402,7 +418,7 @@ interface UserDao {
     }
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class],version = 10,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class,UserReviewQueueItem::class],version = 11,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -531,9 +547,24 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS user_review_queue (
+                        entry_type TEXT NOT NULL,
+                        item_id INTEGER NOT NULL,
+                        queue_order INTEGER NOT NULL,
+                        queued_at INTEGER NOT NULL,
+                        PRIMARY KEY(entry_type, item_id)
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_user_review_queue_queue_order ON user_review_queue(queue_order)")
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build().also { instance=it }
         }
     }
@@ -546,7 +577,7 @@ fun scheduleNextReview(familiarity: String, currentStage: Int = -1, reviewedAt: 
     val safeStage = currentStage.coerceIn(-1, intervals.lastIndex)
     val nextStage = when (familiarity) {
         "熟悉" -> (safeStage + 1).coerceIn(0, intervals.lastIndex)
-        "了解", "有点了解" -> (safeStage - 1).coerceAtLeast(0)
+        "了解", "有点了解", "不会" -> (safeStage - 1).coerceAtLeast(0)
         else -> 0
     }
     val days = intervals[nextStage]
