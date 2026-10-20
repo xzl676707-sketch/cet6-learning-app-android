@@ -266,7 +266,7 @@ private fun Cet6StudyApp() {
         containerColor = AppBg,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (selectedWordId == null && noteTarget == null && page != Page.ALL_NOTES) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
+            if (selectedWordId == null && activeReviewEntry == null && noteTarget == null && page != Page.ALL_NOTES) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
                     Triple(Page.HOME, Icons.Outlined.Home, "首页"),
                     Triple(Page.WORDS, Icons.Outlined.BookmarkBorder, "单词"),
@@ -887,7 +887,7 @@ private fun ReviewNoteCard(note:UserNote,progress:Pair<Int,Int>,dao:UserDao,onBa
         TopAppBar(title={Text("今日复习")},navigationIcon={TextButton(onClick=onBack){Text("‹ 返回列表",color=Green)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=AppBg))
         Text("${progress.first} / ${progress.second} · 笔记",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=10.dp,bottom=10.dp))
         Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed) CardBg else PaleGreen),shape=RoundedCornerShape(24.dp)) {
-            Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(22.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
                 Text(if(note.sourceText.isBlank()) "回忆这条笔记" else note.sourceText,fontSize=20.sp,lineHeight=30.sp,fontWeight=FontWeight.SemiBold,color=DarkGreen)
                 if(revealed) Text(highlightedNoteContent(note.content,noteHighlights),fontSize=15.sp,lineHeight=24.sp,color=Ink)
                 else Text("点卡片空白处查看笔记",fontSize=15.sp,lineHeight=24.sp,color=Ink)
