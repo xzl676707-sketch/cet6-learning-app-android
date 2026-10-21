@@ -36,7 +36,7 @@ class ContentDb private constructor(context: Context) {
     init {
         dbFile.parentFile?.mkdirs()
         val installed = android.util.AtomicFile(dbFile)
-        if (installed.exists()) installed.openRead().close()
+        if (dbFile.exists() || File(dbFile.path + ".bak").exists()) installed.openRead().close()
         val assetVersion = app.assets.open("content_version.txt").bufferedReader().use { it.readText().trim() }
         val prefs = app.getSharedPreferences("content_db", Context.MODE_PRIVATE)
         val savedVersion = prefs.getString("version", null)
