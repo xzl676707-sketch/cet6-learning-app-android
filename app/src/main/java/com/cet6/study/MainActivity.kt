@@ -39,6 +39,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -129,6 +135,7 @@ private suspend fun syncAndLoadReviewQueue(dao: UserDao): ReviewQueueLoad {
 @Composable
 private fun Cet6StudyApp() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val repo = remember { ContentDb.get(context) }
     val userDb = remember { UserDatabase.get(context) }
     val dao = userDb.dao()
@@ -149,7 +156,8 @@ private fun Cet6StudyApp() {
     var due by remember { mutableIntStateOf(0) }
     var dueNotes by remember { mutableIntStateOf(0) }
     val goalPrefs = remember { context.getSharedPreferences("daily_word_goals", android.content.Context.MODE_PRIVATE) }
-    val todayKey = java.time.LocalDate.now().toString()
+    var todayKey by remember { mutableStateOf(java.time.LocalDate.now().toString()) }
+    var resumeToken by remember { mutableIntStateOf(0) }
     var newGoal by remember { mutableIntStateOf(goalPrefs.getInt("new_goal", 10).coerceIn(0, 100)) }
     var todayAddedWordIds by remember { mutableStateOf(emptySet<Int>()) }
     var newDoneToday by remember { mutableIntStateOf(0) }
@@ -216,16 +224,7 @@ private fun Cet6StudyApp() {
     val readyWords = remember { repo.readyWordCount() }
     val totalWords = remember { repo.wordCount() }
 
-    LaunchedEffect(todayKey) {
-        if (goalPrefs.getString("progress_date", null) != todayKey) {
-            goalPrefs.edit().putString("progress_date", todayKey).putInt("new_done", 0).putInt("review_done", 0).apply()
-        }
-        newDoneToday = goalPrefs.getInt("new_done", 0)
-        reviewDoneToday = goalPrefs.getInt("review_done", 0)
-        reviewTotalToday = goalPrefs.getInt("review_total_$todayKey", -1)
-        todayAddedWordIds = goalPrefs.getStringSet("today_added_words_$todayKey", emptySet())
-            ?.mapNotNull { it.toIntOrNull() }?.toSet() ?: emptySet()
-    }
+
 
     fun acceptReviewQueue(entries:List<ReviewQueueEntry>,addedCount:Int) {
         reviewQueue=entries
@@ -262,7 +261,29 @@ private fun Cet6StudyApp() {
         activeReviewEntry=reviewQueue.firstOrNull()
         reviewCardOpen=activeReviewEntry!=null
     }
-    LaunchedEffect(Unit) { refreshCounts() }
+    LaunchedEffect(todayKey, resumeToken) {
+        if (goalPrefs.getString("progress_date", null) != todayKey) {
+            goalPrefs.edit().putString("progress_date", todayKey).putInt("new_done", 0).putInt("review_done", 0).apply()
+        }
+        newDoneToday = goalPrefs.getInt("new_done", 0)
+        reviewDoneToday = goalPrefs.getInt("review_done", 0)
+        reviewTotalToday = goalPrefs.getInt("review_total_$todayKey", -1)
+        todayAddedWordIds = goalPrefs.getStringSet("today_added_words_$todayKey", emptySet())
+            ?.mapNotNull { it.toIntOrNull() }?.toSet() ?: emptySet()
+        refreshCounts()
+    }
+    LaunchedEffect(Unit) {
+        repo.updateNotice?.let { snackbarHostState.showSnackbar(it) }
+    }
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            resumeToken += 1
+            while (isActive) {
+                todayKey = java.time.LocalDate.now().toString()
+                delay(1000L)
+            }
+        }
+    }
 
     Scaffold(
         containerColor = AppBg,
@@ -472,14 +493,23 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
     var showGoalDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(top=22.dp,bottom=24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("CET-6", color=DarkGreen,fontSize=15.sp,fontWeight=FontWeight.SemiBold)
-                    Spacer(Modifier.height(4.dp))
-                    Text("今天也向前一点", color=Ink,fontSize=25.sp,fontWeight=FontWeight.Bold)
-                    Text("把六级真题，变成每天的小进步", color=Muted,fontSize=14.sp)
+            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(
+                Brush.linearGradient(listOf(Color(0xFF244D3B), Color(0xFF527D5A)))
+            )) {
+                Column(Modifier.padding(24.dp), verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(9.dp)) {
+                        Icon(Icons.Outlined.MenuBook, null, tint=Color(0xFFD9E9BB), modifier=Modifier.size(25.dp))
+                        Text("LevelLeap  /  CET-6", color=Color(0xFFD9E9BB), fontSize=13.sp, fontWeight=FontWeight.Medium)
+                    }
+                    Text("今天也向前一点", color=Color.White, fontSize=27.sp, fontWeight=FontWeight.Bold)
+                    Text("把每一次积累，变成下一次进步。", color=Color(0xFFDCE9DC), fontSize=13.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                        listOf("词汇", "阅读", "翻译", "写作").forEach { label ->
+                            Text(label, color=Color.White, fontSize=12.sp, modifier=Modifier.clip(RoundedCornerShape(20.dp)).background(Color.White.copy(alpha=.13f)).padding(horizontal=12.dp,vertical=6.dp))
+                        }
+                    }
                 }
-                Box(Modifier.size(48.dp).clip(CircleShape).background(PaleGreen),contentAlignment=Alignment.Center){Text("✦",color=Green,fontSize=23.sp)}
             }
         }
         item {
@@ -503,7 +533,6 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
                         Button(onClick=onStartReview,enabled=(due+dueNotes)>0,colors=ButtonDefaults.buttonColors(containerColor=PaleBlue,contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.55f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("开始复习 ${due+dueNotes}",fontWeight=FontWeight.SemiBold) }
                         Button(onClick=onNewWords,enabled=newDone<(newGoal+addedTodayCount),colors=ButtonDefaults.buttonColors(containerColor=Color.White.copy(alpha=.8f),contentColor=DarkGreen,disabledContainerColor=Color.White.copy(alpha=.5f),disabledContentColor=Muted),shape=RoundedCornerShape(14.dp)) { Text("学习新词  →",fontWeight=FontWeight.SemiBold) }
                     }
-                    Text("新词按每日目标安排；复习数量由间隔周期和今天实际到期的词、笔记决定。",color=Muted,fontSize=12.sp)
                 }
             }
         }
@@ -517,16 +546,7 @@ private fun HomeScreen(readyWords: Int,totalWords: Int,studied: Int,due: Int,due
         item { ModuleCard("作文积累","题目、范文与个人笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onWriting) }
         item { ModuleCard("今日复习","单词 $due · 笔记 $dueNotes",Icons.Outlined.BookmarkBorder,Modifier.fillMaxWidth(),onNoteReview) }
         item { ModuleCard("全部笔记","查看和编辑所有已保存的笔记",Icons.Outlined.EditNote,Modifier.fillMaxWidth(),onAllNotes) }
-        item {
-            Card(colors=CardDefaults.cardColors(containerColor=PaleYellow),shape=RoundedCornerShape(18.dp)) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("离线学习",fontWeight=FontWeight.SemiBold,color=Ink)
-                    Spacer(Modifier.height(4.dp))
-                    Text("内容和进度保存在本机。词库补齐后可以继续加入，不会清掉你的学习记录。",fontSize=13.sp,color=Muted)
-                    Text("当前词库：$totalWords 个词 · $readyWords 个词已具备 3 条默认例句",fontSize=12.sp,color=DarkGreen,modifier=Modifier.padding(top=7.dp))
-                }
-            }
-        }
+
     }
     if(showGoalDialog) DailyGoalDialog(newGoal,{showGoalDialog=false}) { newValue ->
         onGoalChange(newValue)
@@ -779,8 +799,6 @@ private fun WordDetailScreen(wordId:Int,progress:Pair<Int,Int>,repo:ContentDb,da
                     }
                 }
                 if(revealed) item {
-                    Text("记忆情况",fontWeight=FontWeight.SemiBold,fontSize=18.sp,color=Ink)
-                    Text(if(isLearningSession) "选择“熟悉”或“彻底熟悉”会计入今日新词；“不会/有点了解”会在本组其他新词后重看。" else "点“熟悉”才计入今日复习；“不会/有点了解”会稍后重试，“彻底熟悉”会永久移出队列。",fontSize=12.sp,lineHeight=18.sp,color=Muted)
                     if(currentStatus?.isMastered==true) {
                         Text("已彻底熟悉，不会再进入自动复习队列。",color=Green,fontSize=13.sp)
                     } else {
@@ -1810,7 +1828,7 @@ private fun NotesScreen(target: NoteTarget, dao: UserDao, onBack: () -> Unit, on
                     val now = System.currentTimeMillis()
                     val old = current
                     val draft = old?.copy(content = value.text, updatedAt = now)
-                        ?: UserNote(itemType = target.type, itemId = target.id, sourceText = target.sourceText, content = value.text, updatedAt = now, reviewStage = -1, nextReview = now + 24L * 60L * 60L * 1000L)
+                        ?: UserNote(itemType = target.type, itemId = target.id, sourceText = target.sourceText, content = value.text, updatedAt = now, reviewStage = -1, nextReview = reviewDateAfterDays(now, 1))
                     val savedId = withContext(Dispatchers.IO) { dao.saveNote(draft) }
                     val savedHighlights = highlights.map { it.copy(highlightId = 0, noteId = savedId) }
                     withContext(Dispatchers.IO) { dao.replaceNoteHighlights(savedId, savedHighlights) }
@@ -1871,3 +1889,4 @@ private fun PaperSelector(papers:List<PaperCard>,selectedId:String,onSelect:(Str
         }
     }
 }
+
