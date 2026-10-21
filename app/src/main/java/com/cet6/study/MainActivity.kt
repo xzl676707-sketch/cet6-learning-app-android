@@ -141,6 +141,7 @@ private fun Cet6StudyApp() {
     var wordListMode by remember { mutableStateOf(WordListMode.NEW) }
     var reviewQueue by remember { mutableStateOf(emptyList<ReviewQueueEntry>()) }
     var activeReviewEntry by remember { mutableStateOf<ReviewQueueEntry?>(null) }
+    var reviewCardOpen by remember { mutableStateOf(false) }
     var reviewTotalToday by remember { mutableIntStateOf(0) }
     var noteTarget by remember { mutableStateOf<NoteTarget?>(null) }
     var allNotesRefresh by remember { mutableIntStateOf(0) }
@@ -259,6 +260,7 @@ private fun Cet6StudyApp() {
         }
         refreshCounts()
         activeReviewEntry=reviewQueue.firstOrNull()
+        reviewCardOpen=activeReviewEntry!=null
     }
     LaunchedEffect(Unit) { refreshCounts() }
 
@@ -266,7 +268,7 @@ private fun Cet6StudyApp() {
         containerColor = AppBg,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (selectedWordId == null && activeReviewEntry == null && noteTarget == null && page != Page.ALL_NOTES) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
+            if (!reviewCardOpen && selectedWordId == null && activeReviewEntry == null && noteTarget == null && page != Page.ALL_NOTES) NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 val entries = listOf(
                     Triple(Page.HOME, Icons.Outlined.Home, "首页"),
                     Triple(Page.WORDS, Icons.Outlined.BookmarkBorder, "单词"),
@@ -289,7 +291,7 @@ private fun Cet6StudyApp() {
                         wordId=entry.wordId,
                         progress=(reviewDoneToday+position) to reviewTotalToday,
                         repo=repo,dao=dao,onWordLookup=::lookupSelectedText,isLearningSession=false,
-                        onBack={activeReviewEntry=null},
+                        onBack={activeReviewEntry=null; reviewCardOpen=false},
                         onRated={_,value->scope.launch { applyReviewRating(entry,value) }},
                         onMastered={scope.launch {
                             withContext(Dispatchers.IO) { dao.markWordMastered(entry.wordId,Long.MAX_VALUE) }
@@ -302,7 +304,7 @@ private fun Cet6StudyApp() {
                     val position=reviewQueue.indexOfFirst { it is ReviewQueueEntry.Note && it.note.noteId==entry.note.noteId }.coerceAtLeast(0)+1
                     ReviewNoteCard(
                         note=entry.note,progress=(reviewDoneToday+position) to reviewTotalToday,dao=dao,
-                        onBack={activeReviewEntry=null},
+                        onBack={activeReviewEntry=null; reviewCardOpen=false},
                         onRated={value->scope.launch { applyReviewRating(entry,value) }},
                         onMastered={scope.launch {
                             val now=System.currentTimeMillis()
@@ -320,7 +322,7 @@ private fun Cet6StudyApp() {
                     dao = dao,
                     onWordLookup = ::lookupSelectedText,
                     isLearningSession = wordLearningSession,
-                    onBack = { selectedWordId = null; scope.launch { refreshCounts() } },
+                    onBack = { selectedWordId = null; reviewCardOpen=false; scope.launch { refreshCounts() } },
                     onRated = { completedNewWord, _ ->
                         if (wordLearningSession && completedNewWord) {
                             newDoneToday += 1
@@ -345,6 +347,7 @@ private fun Cet6StudyApp() {
                                 goalPrefs.edit().putInt("new_done",newDoneToday).apply()
                             }
                             selectedWordId=null
+                            reviewCardOpen=false
                             refreshCounts()
                         }
                     }
@@ -353,7 +356,7 @@ private fun Cet6StudyApp() {
                     Page.HOME -> HomeScreen(readyWords, totalWords, studied, due, dueNotes, newGoal, todayAddedWordIds.size, newDoneToday, reviewDoneToday, reviewTotalToday,
                         onNewWords = { wordListMode = WordListMode.NEW; page = Page.WORDS },
                         onReview = { wordListMode = WordListMode.REVIEW; page = Page.WORDS },
-                        onStartReview = { wordListMode=WordListMode.REVIEW; page=Page.WORDS; scope.launch { refreshCounts(); activeReviewEntry=reviewQueue.firstOrNull() } },
+                        onStartReview = { wordListMode=WordListMode.REVIEW; page=Page.WORDS; reviewCardOpen=false; scope.launch { refreshCounts(); activeReviewEntry=reviewQueue.firstOrNull(); reviewCardOpen=activeReviewEntry!=null } },
                         onWords = { wordListMode = WordListMode.ALL; page = Page.WORDS },
                         onReading = { page = Page.READING }, onTranslation = { page = Page.TRANSLATION }, onWriting = { page = Page.WRITING },
                         onNoteReview = { wordListMode=WordListMode.REVIEW; page = Page.WORDS },
@@ -362,10 +365,11 @@ private fun Cet6StudyApp() {
                             newGoal = newValue
                             goalPrefs.edit().putInt("new_goal", newValue).apply()
                         })
-                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { mode -> wordListMode=mode }, onReviewQueueLoaded={entries,added->acceptReviewQueue(entries,added)}, onReviewEntry={entry->activeReviewEntry=entry}, onWord = { id, queue ->
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { mode -> wordListMode=mode }, onReviewQueueLoaded={entries,added->acceptReviewQueue(entries,added)}, onReviewEntry={entry->selectedWordId=null; activeReviewEntry=entry; reviewCardOpen=true}, onWord = { id, queue ->
                         wordQueue = queue.dropWhile { it != id }
                         wordLearningSession = wordListMode == WordListMode.NEW
                         selectedWordId = id
+                        reviewCardOpen = wordListMode == WordListMode.REVIEW
                     })
                     Page.READING -> ReadingScreen(
                         repo, dao, todayAddedWordIds,
