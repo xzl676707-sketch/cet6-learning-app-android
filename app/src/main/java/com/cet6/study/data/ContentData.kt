@@ -17,7 +17,6 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.io.File
 import java.io.FileOutputStream
-import java.time.LocalDate
 
 private fun SQLiteDatabase.string(c: android.database.Cursor, name: String): String = c.getString(c.getColumnIndexOrThrow(name)) ?: ""
 private fun SQLiteDatabase.int(c: android.database.Cursor, name: String): Int = c.getInt(c.getColumnIndexOrThrow(name))
@@ -31,22 +30,69 @@ class ContentDb private constructor(context: Context) {
     private val app = context.applicationContext
     private val dbFile = File(app.getDatabasePath("cet6_content.db").absolutePath)
     private val database: SQLiteDatabase
+    var updateNotice: String? = null
+        private set
 
     init {
         dbFile.parentFile?.mkdirs()
+        val installed = android.util.AtomicFile(dbFile)
+        if (installed.exists()) installed.openRead().close()
         val assetVersion = app.assets.open("content_version.txt").bufferedReader().use { it.readText().trim() }
         val prefs = app.getSharedPreferences("content_db", Context.MODE_PRIVATE)
         val savedVersion = prefs.getString("version", null)
         if (!dbFile.exists() || savedVersion != assetVersion) {
             val temp = File(dbFile.parentFile, "cet6_content.tmp")
-            app.assets.open("cet6_content.db").use { input ->
-                FileOutputStream(temp).use { output -> input.copyTo(output); output.fd.sync() }
+            try {
+                app.assets.open("cet6_content.db").use { input ->
+                    FileOutputStream(temp).use { output -> input.copyTo(output); output.fd.sync() }
+                }
+                SQLiteDatabase.openDatabase(temp.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { candidate ->
+                    candidate.rawQuery("PRAGMA integrity_check", null).use { c ->
+                        check(c.moveToFirst() && c.getString(0) == "ok") { "内容库损坏" }
+                    }
+                    candidate.rawQuery("PRAGMA foreign_key_check", null).use { c ->
+                        check(!c.moveToFirst()) { "内容库关联错误" }
+                    }
+                    if (dbFile.exists()) verifyContentIds(candidate, dbFile)
+                }
+                val atomic = android.util.AtomicFile(dbFile)
+                val output = atomic.startWrite()
+                try {
+                    temp.inputStream().use { it.copyTo(output) }
+                    atomic.finishWrite(output)
+                } catch (error: Exception) {
+                    atomic.failWrite(output)
+                    throw error
+                }
+                prefs.edit().putString("version", assetVersion).commit()
+            } catch (error: Exception) {
+                if (!dbFile.exists()) throw error
+                updateNotice = "资料库更新未完成，已保留旧资料和学习记录：${error.message}"
+            } finally {
+                temp.delete()
             }
-            if (dbFile.exists()) dbFile.delete()
-            check(temp.renameTo(dbFile)) { "无法安装离线内容库" }
-            prefs.edit().putString("version", assetVersion).apply()
         }
         database = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+    }
+
+    // Refuse an update that would make saved notes or learning state point at a different item.
+    private fun verifyContentIds(candidate: SQLiteDatabase, previousFile: File) {
+        candidate.execSQL("ATTACH DATABASE ? AS previous", arrayOf(previousFile.absolutePath))
+        try {
+            val identities = listOf(
+                Triple("words", "word_id", listOf("lemma")),
+                Triple("content_units", "unit_id", listOf("paper_id", "module", "content_type", "reading_type", "passage_no", "paragraph_no", "question_no", "option_label", "parent_unit_id", "order_no")),
+                Triple("writing_samples", "sample_id", listOf("prompt_unit_id", "sample_type"))
+            )
+            for ((table, id, columns) in identities) {
+                val changed = columns.joinToString(" OR ") { "old.$it IS NOT fresh.$it" }
+                candidate.rawQuery("SELECT old.$id FROM previous.$table old LEFT JOIN main.$table fresh ON old.$id=fresh.$id WHERE fresh.$id IS NULL OR $changed LIMIT 1", null).use { c ->
+                    check(!c.moveToFirst()) { "$table 的原有编号不兼容" }
+                }
+            }
+        } finally {
+            candidate.execSQL("DETACH DATABASE previous")
+        }
     }
 
     fun wordCount(): Int = database.rawQuery("SELECT COUNT(*) FROM words", null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
@@ -418,7 +464,7 @@ interface UserDao {
     }
 }
 
-@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class,UserReviewQueueItem::class],version = 11,exportSchema = false)
+@Database(entities = [UserWordStatus::class,UserNote::class,UserNoteHighlight::class,UserReviewHistory::class,UserReadingStatus::class,UserWritingHighlight::class,UserWritingText::class,UserWordFolder::class,UserWordFavorite::class,UserReviewQueueItem::class],version = 12,exportSchema = false)
 abstract class UserDatabase : RoomDatabase() {
     abstract fun dao(): UserDao
     companion object {
@@ -562,25 +608,26 @@ abstract class UserDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Keep every record; align existing finite due times with the local calendar day.
+                for ((table, id) in listOf("user_word_status" to "word_id", "user_notes" to "noteId")) {
+                    val updates = mutableListOf<Pair<Long, Long>>()
+                    database.query("SELECT $id,next_review FROM $table WHERE next_review>0 AND next_review<${Long.MAX_VALUE}").use { c ->
+                        while (c.moveToNext()) updates.add(c.getLong(0) to reviewDayStartMillis(c.getLong(1)))
+                    }
+                    updates.forEach { (itemId, dueAt) ->
+                        database.execSQL("UPDATE $table SET next_review=? WHERE $id=?", arrayOf(dueAt, itemId))
+                    }
+                }
+            }
+        }
+
         fun get(context: Context): UserDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,UserDatabase::class.java,"user_data.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                 .build().also { instance=it }
         }
     }
 }
 
-data class ReviewSchedule(val stage: Int, val intervalDays: Int, val nextReviewMillis: Long)
-
-fun scheduleNextReview(familiarity: String, currentStage: Int = -1, reviewedAt: Long = System.currentTimeMillis()): ReviewSchedule {
-    val intervals = listOf(1, 3, 7, 15, 30, 60)
-    val safeStage = currentStage.coerceIn(-1, intervals.lastIndex)
-    val nextStage = when (familiarity) {
-        "熟悉" -> (safeStage + 1).coerceIn(0, intervals.lastIndex)
-        "了解", "有点了解", "不会" -> (safeStage - 1).coerceAtLeast(0)
-        else -> 0
-    }
-    val days = intervals[nextStage]
-    return ReviewSchedule(nextStage, days, reviewedAt + days * 24L * 60L * 60L * 1000L)
-}
-fun todayStartMillis(): Long = LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()

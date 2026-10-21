@@ -1,7 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="true"
-        android:label="六级学习"
+        android:label="LevelLeap"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Cet6Study"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
@@ -12,3 +14,4 @@
         </activity>
     </application>
 </manifest>
+
