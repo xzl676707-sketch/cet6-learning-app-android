@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1043,7 +1044,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                 val blankQuestions=questions.filter{it.evidenceUnitId==sentence.unitId && it.questionNo!=null}
                 val selectedBlank=blankQuestions.firstOrNull{it.unitId==selectedBlankId}
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
-                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed && selectedBlank==null){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                         SelectableReadingText(
@@ -1069,28 +1070,33 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                         if(selectedType=="word_bank" && blankQuestions.isNotEmpty()) {
                             HorizontalDivider(color=PaleGreen)
                             Text("本篇可选词",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            wordBank.chunked(5).forEach { rowWords ->
-                                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp)) {
-                                    rowWords.forEach { word -> Text(word,fontSize=12.sp,maxLines=1,color=Ink,modifier=Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(AppBg).padding(horizontal=7.dp,vertical=8.dp)) }
-                                    repeat(5-rowWords.size){Spacer(Modifier.weight(1f))}
+                            wordBank.chunked(2).forEach { rowWords ->
+                                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                    rowWords.forEach { word ->
+                                        Text(word,fontSize=14.sp,lineHeight=20.sp,color=Ink,
+                                            modifier=Modifier.weight(1f).heightIn(min=48.dp)
+                                                .clip(RoundedCornerShape(10.dp)).background(AppBg)
+                                                .padding(horizontal=12.dp,vertical=12.dp))
+                                    }
+                                    repeat(2-rowWords.size){Spacer(Modifier.weight(1f))}
                                 }
                             }
                         }
                         if(selectedType=="word_bank" && selectedBlank!=null) {
                             HorizontalDivider(color=PaleGreen)
                             Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                            SelectionContainer { Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink) }
                             val chosenWord=selectedBlank.optionText.ifBlank{selectedBlank.answer}
                             Text("第 ${selectedBlank.questionNo} 空，正确答案：$chosenWord",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
                             if(selectedBlank.optionText.isNotBlank() && selectedBlank.answer.isNotBlank() && !selectedBlank.answer.equals(selectedBlank.optionText,true)) Text("答案选项：${selectedBlank.answer}",fontSize=12.sp,color=Muted)
-                            if(selectedBlank.explanation.isNotBlank()) Text("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
-                            if(sentence.analysis.isNotBlank()) Text("句子分析：${cleanMarkup(sentence.analysis)}",fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                            if(selectedBlank.explanation.isNotBlank()) SelectionContainer { Text("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",fontSize=14.sp,lineHeight=22.sp,color=Muted) }
+                            if(sentence.analysis.isNotBlank()) SelectionContainer { Text("句子分析：${cleanMarkup(sentence.analysis)}",fontSize=14.sp,lineHeight=22.sp,color=Muted) }
                         } else if(revealed) {
                             HorizontalDivider(color=PaleGreen)
                             Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink)
+                            SelectionContainer { Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink) }
                             Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted)
+                            SelectionContainer { Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted) }
                         } else Text(if(selectedType=="word_bank") "点击空格查看该空答案；没有空格时点句子或卡片空白处查看译文。长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
                     }
                 }
