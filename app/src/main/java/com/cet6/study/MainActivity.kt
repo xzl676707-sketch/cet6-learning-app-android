@@ -981,7 +981,11 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
     var revealed by remember(selectedId,selectedType,selectedPassage,sentenceIndex) { mutableStateOf(false) }
     val scope=rememberCoroutineScope()
     LaunchedEffect(Unit) { papers=withContext(Dispatchers.IO){repo.getPapers("reading")} }
-    LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) { readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}; selectedType=readingTypes.firstOrNull().orEmpty() } }
+    LaunchedEffect(selectedId) { if(selectedId.isNotBlank()) {
+        readingTypes=withContext(Dispatchers.IO){repo.getReadingTypes(selectedId)}
+        val savedType=readingPrefs.getString("type_$selectedId",null)
+        selectedType=readingTypes.firstOrNull{it==savedType} ?: readingTypes.firstOrNull().orEmpty()
+    } }
     LaunchedEffect(selectedId,selectedType) {
         if(selectedId.isNotBlank() && selectedType.isNotBlank()) {
             val loaded=withContext(Dispatchers.IO) { Triple(repo.getReadingSentences(selectedId,selectedType),repo.getQuestions(selectedId,selectedType),dao.readingStatuses(selectedId,selectedType)) }
@@ -1023,12 +1027,16 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
             ScreenHeading("阅读精读", "逐句精读；长按任意文字范围可记笔记")
             PaperSelector(papers,selectedId,selectPaper)
             Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={selectedType=type},label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
+            Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { readingTypes.forEach { type -> FilterChip(selected=selectedType==type,onClick={
+                selectedType=type
+                readingPrefs.edit().putString("type_$selectedId",type).apply()
+            },label={Text(typeLabel(type),fontSize=12.sp)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen,selectedLabelColor=DarkGreen)) } }
             Text("本套已精读 $completedPassages / ${passageNos.size} 篇",fontSize=13.sp,color=Muted,modifier=Modifier.padding(top=12.dp,bottom=8.dp))
             LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 items(passageNos) { passageNo ->
                     val rows=sentences.filter{it.passageNo==passageNo}
                     val done=rows.count{statusByUnit[it.unitId]?.familiarity in setOf("完全解决","熟悉")}
+                    val resumeIndex=resumeSentenceIndex(passageNo)
                     Card(colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(20.dp)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
@@ -1036,7 +1044,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                                 Text("$done / ${rows.size} 句",fontSize=12.sp,color=Muted)
                             }
                             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                                Button(onClick={selectedPassage=passageNo;sentenceIndex=resumeSentenceIndex(passageNo);readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text("开始精读") }
+                                Button(onClick={selectedPassage=passageNo;sentenceIndex=resumeIndex;readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text(if(resumeIndex>0) "继续精读 · 第${resumeIndex+1}句" else "开始精读",fontSize=12.sp) }
                                 OutlinedButton(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="整篇通读";inReader=true},modifier=Modifier.weight(1f),shape=RoundedCornerShape(13.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green),contentPadding=PaddingValues(vertical=10.dp)) { Text("整篇阅读") }
                             }
                         }
