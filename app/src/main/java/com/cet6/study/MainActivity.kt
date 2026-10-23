@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -966,6 +965,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
     var papers by remember { mutableStateOf(emptyList<PaperCard>()) }
     val context=LocalContext.current
     val paperPrefs=remember(context){context.getSharedPreferences("last_paper_selection",android.content.Context.MODE_PRIVATE)}
+    val readingPrefs=remember(context){context.getSharedPreferences("reading_sentence_position",android.content.Context.MODE_PRIVATE)}
     val (selectedId,selectPaper)=rememberSelectedPaperId("reading",papers,paperPrefs)
     var selectedType by remember { mutableStateOf("") }
     var readingTypes by remember { mutableStateOf(emptyList<String>()) }
@@ -990,13 +990,29 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
             wordBank=if(selectedType=="word_bank") withContext(Dispatchers.IO){repo.getWordBank(selectedId)} else emptyList()
             statuses=loaded.third
             selectedBlankId=-1
-            selectedPassage=loaded.first.firstOrNull()?.passageNo ?: 1
-            sentenceIndex=0
+            val passageKey="passage_${selectedId}_${selectedType}"
+            val savedPassage=readingPrefs.getInt(passageKey,-1)
+            selectedPassage=if(loaded.first.any{it.passageNo==savedPassage}) savedPassage else loaded.first.firstOrNull()?.passageNo ?: 1
+            val rows=loaded.first.filter{it.passageNo==selectedPassage}
+            val savedUnitId=readingPrefs.getInt("sentence_${selectedId}_${selectedType}_${selectedPassage}",-1)
+            sentenceIndex=rows.indexOfFirst{it.unitId==savedUnitId}.coerceAtLeast(0)
         }
+    }
+    fun resumeSentenceIndex(passageNo:Int):Int {
+        val savedUnitId=readingPrefs.getInt("sentence_${selectedId}_${selectedType}_${passageNo}",-1)
+        return sentences.filter{it.passageNo==passageNo}.indexOfFirst{it.unitId==savedUnitId}.coerceAtLeast(0)
     }
     val passageNos=sentences.mapNotNull{it.passageNo}.distinct().sorted()
     val passageSentences=sentences.filter{it.passageNo==selectedPassage}
     val sentence=passageSentences.getOrNull(sentenceIndex)
+    LaunchedEffect(selectedId,selectedType,selectedPassage,sentence?.unitId,inReader,readerMode) {
+        if(inReader && readerMode=="逐句精读" && selectedId.isNotBlank() && selectedType.isNotBlank() && sentence!=null) {
+            readingPrefs.edit()
+                .putInt("passage_${selectedId}_${selectedType}",selectedPassage)
+                .putInt("sentence_${selectedId}_${selectedType}_${selectedPassage}",sentence.unitId)
+                .apply()
+        }
+    }
     val statusByUnit=statuses.associateBy{it.unitId}
     val completedPassages=passageNos.count { no ->
         val rows=sentences.filter{it.passageNo==no}
@@ -1020,7 +1036,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                                 Text("$done / ${rows.size} 句",fontSize=12.sp,color=Muted)
                             }
                             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                                Button(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text("开始精读") }
+                                Button(onClick={selectedPassage=passageNo;sentenceIndex=resumeSentenceIndex(passageNo);readerMode="逐句精读";inReader=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=Green),shape=RoundedCornerShape(13.dp),contentPadding=PaddingValues(vertical=10.dp)) { Text("开始精读") }
                                 OutlinedButton(onClick={selectedPassage=passageNo;sentenceIndex=0;readerMode="整篇通读";inReader=true},modifier=Modifier.weight(1f),shape=RoundedCornerShape(13.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=Green),contentPadding=PaddingValues(vertical=10.dp)) { Text("整篇阅读") }
                             }
                         }
@@ -1085,18 +1101,18 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                         if(selectedType=="word_bank" && selectedBlank!=null) {
                             HorizontalDivider(color=PaleGreen)
                             Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            SelectionContainer { Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink) }
+                            CopyableReadingDetail(sentence.translation.ifBlank{"暂无译文"},15f,false)
                             val chosenWord=selectedBlank.optionText.ifBlank{selectedBlank.answer}
                             Text("第 ${selectedBlank.questionNo} 空，正确答案：$chosenWord",fontSize=14.sp,fontWeight=FontWeight.Bold,color=DarkGreen)
                             if(selectedBlank.optionText.isNotBlank() && selectedBlank.answer.isNotBlank() && !selectedBlank.answer.equals(selectedBlank.optionText,true)) Text("答案选项：${selectedBlank.answer}",fontSize=12.sp,color=Muted)
-                            if(selectedBlank.explanation.isNotBlank()) SelectionContainer { Text("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",fontSize=14.sp,lineHeight=22.sp,color=Muted) }
-                            if(sentence.analysis.isNotBlank()) SelectionContainer { Text("句子分析：${cleanMarkup(sentence.analysis)}",fontSize=14.sp,lineHeight=22.sp,color=Muted) }
+                            if(selectedBlank.explanation.isNotBlank()) CopyableReadingDetail("为什么选这个：${cleanMarkup(selectedBlank.explanation)}",14f,true)
+                            if(sentence.analysis.isNotBlank()) CopyableReadingDetail("句子分析：${cleanMarkup(sentence.analysis)}",14f,true)
                         } else if(revealed) {
                             HorizontalDivider(color=PaleGreen)
                             Text("译文",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            SelectionContainer { Text(sentence.translation.ifBlank{"暂无译文"},fontSize=15.sp,lineHeight=24.sp,color=Ink) }
+                            CopyableReadingDetail(sentence.translation.ifBlank{"暂无译文"},15f,false)
                             Text("怎么看",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
-                            SelectionContainer { Text(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},fontSize=14.sp,lineHeight=22.sp,color=Muted) }
+                            CopyableReadingDetail(cleanMarkup(sentence.analysis).ifBlank{"暂无结构分析"},14f,true)
                         } else Text(if(selectedType=="word_bank") "点击空格查看该空答案；没有空格时点句子或卡片空白处查看译文。长按文字范围可记笔记" else "点句子查看译文和分析；长按文字范围可记笔记",fontSize=13.sp,color=Muted)
                     }
                 }
@@ -1390,6 +1406,22 @@ private fun List<ReadingSentence>.groupIntoReadableParagraphs():List<ReadingPara
 @Composable
 private fun SelectableNoteText(value:androidx.compose.ui.text.AnnotatedString,type:String,itemId:Int,title:String,onNote:(NoteTarget)->Unit,userHighlightRanges:List<IntRange> = emptyList(),onHighlightSelection:((Int,Int)->Unit)? = null,onWordLookup:((String)->Unit)? = null) {
     SelectableReadingText(value.text, {}, { selection -> onNote(NoteTarget(type, itemId, title, sourceText = selection)) }, value.spanStyles.map { it.start until it.end } + userHighlightRanges, onHighlightSelection,onWordLookup)
+}
+
+@Composable
+private fun CopyableReadingDetail(text:String,sizeSp:Float,muted:Boolean) {
+    AndroidView(
+        modifier=Modifier.fillMaxWidth(),
+        factory={ context ->
+            TextView(context).apply {
+                setTextColor(if(muted) android.graphics.Color.rgb(120,135,127) else android.graphics.Color.rgb(36,53,46))
+                textSize=sizeSp
+                setLineSpacing(0f,1.35f)
+                setTextIsSelectable(true)
+            }
+        },
+        update={ view -> if(view.text.toString()!=text) view.text=text }
+    )
 }
 
 @Composable
