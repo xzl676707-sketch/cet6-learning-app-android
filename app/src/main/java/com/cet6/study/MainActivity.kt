@@ -1044,7 +1044,7 @@ private fun ReadingScreen(repo:ContentDb,dao:UserDao,todayAddedWordIds:Set<Int>,
                 val blankQuestions=questions.filter{it.evidenceUnitId==sentence.unitId && it.questionNo!=null}
                 val selectedBlank=blankQuestions.firstOrNull{it.unitId==selectedBlankId}
                 Text("第 ${sentenceIndex+1} / ${passageSentences.size} 句 · ${status?.familiarity ?: "未完成"}",fontSize=13.sp,color=Muted,modifier=Modifier.padding(bottom=8.dp))
-                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed && selectedBlank==null){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
+                Card(Modifier.fillMaxWidth().weight(1f).clickable(enabled=!revealed){revealed=true},colors=CardDefaults.cardColors(containerColor=if(revealed || selectedBlank!=null) CardBg else PaleGreen),shape=RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(20.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         if(sentence.paragraphNo!=null && selectedType=="matching") Text("第 ${sentence.paragraphNo} 段",fontSize=12.sp,fontWeight=FontWeight.Bold,color=Green)
                         SelectableReadingText(
