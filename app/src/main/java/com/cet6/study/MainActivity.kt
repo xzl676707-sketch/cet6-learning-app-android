@@ -98,6 +98,10 @@ private sealed class ReviewQueueEntry {
     data class Word(val wordId: Int, override val dueAt: Long) : ReviewQueueEntry()
     data class Note(val note: UserNote) : ReviewQueueEntry() { override val dueAt: Long get() = note.nextReview }
 }
+private fun ReviewQueueEntry.queueKey(): Pair<String,Long> = when(this) {
+    is ReviewQueueEntry.Word -> "word" to wordId.toLong()
+    is ReviewQueueEntry.Note -> "note" to note.noteId
+}
 private data class ReviewQueueLoad(val entries: List<ReviewQueueEntry>, val addedCount: Int)
 
 private suspend fun syncAndLoadReviewQueue(dao: UserDao): ReviewQueueLoad {
@@ -249,6 +253,7 @@ private fun Cet6StudyApp() {
             is ReviewQueueEntry.Word -> "word" to entry.wordId.toLong()
             is ReviewQueueEntry.Note -> "note" to entry.note.noteId
         }
+        val previousOrder=reviewQueue.map { it.queueKey() }
         withContext(Dispatchers.IO) {
             if(mastered || value=="熟悉") dao.removeReviewQueueItem(type,id)
             else dao.moveReviewQueueItemToEnd(type,id)
@@ -258,7 +263,8 @@ private fun Cet6StudyApp() {
             goalPrefs.edit().putInt("review_done",reviewDoneToday).apply()
         }
         refreshCounts()
-        activeReviewEntry=reviewQueue.firstOrNull()
+        val nextKey=nextQueueItem(previousOrder,entry.queueKey(),reviewQueue.map { it.queueKey() })
+        activeReviewEntry=reviewQueue.firstOrNull { it.queueKey()==nextKey }
         reviewCardOpen=activeReviewEntry!=null
     }
     LaunchedEffect(todayKey, resumeToken) {
@@ -367,7 +373,8 @@ private fun Cet6StudyApp() {
                                 newDoneToday += 1
                                 goalPrefs.edit().putInt("new_done",newDoneToday).apply()
                             }
-                            selectedWordId=null
+                            wordQueue=wordQueue.dropWhile { it!=masteredId }.drop(1)
+                            selectedWordId=wordQueue.firstOrNull()
                             reviewCardOpen=false
                             refreshCounts()
                         }
@@ -386,7 +393,19 @@ private fun Cet6StudyApp() {
                             newGoal = newValue
                             goalPrefs.edit().putInt("new_goal", newValue).apply()
                         })
-                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { mode -> wordListMode=mode }, onReviewQueueLoaded={entries,added->acceptReviewQueue(entries,added)}, onReviewEntry={entry->selectedWordId=null; activeReviewEntry=entry; reviewCardOpen=true}, onWord = { id, queue ->
+                    Page.WORDS -> WordListScreen(repo, dao, wordListMode, newGoal, newDoneToday, todayAddedWordIds, onMode = { mode -> wordListMode=mode }, onBatchComplete={ ids,mastered ->
+                        val learning=wordListMode==WordListMode.NEW
+                        val completed=withContext(Dispatchers.IO) { dao.completeWords(ids,mastered,learning) }
+                        if(learning) {
+                            newDoneToday+=completed.newlyLearned
+                            goalPrefs.edit().putInt("new_done",newDoneToday).apply()
+                        }
+                        if(completed.reviewed>0) {
+                            reviewDoneToday+=completed.reviewed
+                            goalPrefs.edit().putInt("review_done",reviewDoneToday).apply()
+                        }
+                        refreshCounts()
+                    }, onReviewQueueLoaded={entries,added->acceptReviewQueue(entries,added)}, onReviewEntry={entry->selectedWordId=null; activeReviewEntry=entry; reviewCardOpen=true}, onWord = { id, queue ->
                         wordQueue = queue.dropWhile { it != id }
                         wordLearningSession = wordListMode == WordListMode.NEW
                         selectedWordId = id
@@ -610,7 +629,7 @@ private fun ModuleCard(title:String,subtitle:String,icon:androidx.compose.ui.gra
 }
 
 @Composable
-private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,addedWordIds:Set<Int>,onMode:(WordListMode)->Unit,onReviewQueueLoaded:(List<ReviewQueueEntry>,Int)->Unit,onReviewEntry:(ReviewQueueEntry)->Unit,onWord:(Int,List<Int>)->Unit) {
+private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:Int,newDone:Int,addedWordIds:Set<Int>,onMode:(WordListMode)->Unit,onBatchComplete:suspend (List<Int>,Boolean)->Unit,onReviewQueueLoaded:(List<ReviewQueueEntry>,Int)->Unit,onReviewEntry:(ReviewQueueEntry)->Unit,onWord:(Int,List<Int>)->Unit) {
     var search by remember { mutableStateOf("") }
     var dueNoteTotal by remember { mutableIntStateOf(0) }
     var dueIds by remember { mutableStateOf(emptyList<Int>()) }
@@ -621,6 +640,35 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
     var selectedFolderId by remember { mutableStateOf<Long?>(null) }
     var favoriteIds by remember { mutableStateOf(emptyList<Int>()) }
     var folderMenuExpanded by remember { mutableStateOf(false) }
+    var selecting by remember(mode) { mutableStateOf(false) }
+    var selectedIds by remember(mode,search) { mutableStateOf(emptySet<Int>()) }
+    var batchSaving by remember { mutableStateOf(false) }
+    var batchError by remember { mutableStateOf<String?>(null) }
+    var reloadToken by remember { mutableIntStateOf(0) }
+    val scope=rememberCoroutineScope()
+    fun toggleWord(id:Int) {
+        selectedIds=if(id in selectedIds) selectedIds-id else selectedIds+id
+    }
+    fun completeSelected(mastered:Boolean) {
+        if(batchSaving || selectedIds.isEmpty()) return
+        val ids=selectedIds.toList()
+        batchSaving=true
+        batchError=null
+        scope.launch {
+            try {
+                onBatchComplete(ids,mastered)
+                selectedIds=emptySet()
+                selecting=false
+                reloadToken++
+            } catch(e:kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch(e:Exception) {
+                batchError="保存失败，请重试。"
+            } finally {
+                batchSaving=false
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         folders=withContext(Dispatchers.IO) {
@@ -630,7 +678,7 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
         if(selectedFolderId==null) selectedFolderId=folders.firstOrNull()?.folderId
     }
     LaunchedEffect(search) { words=withContext(Dispatchers.IO){repo.getWords(search,2500)} }
-    LaunchedEffect(mode,newGoal,newDone,addedWordIds) {
+    LaunchedEffect(mode,newGoal,newDone,addedWordIds,reloadToken) {
         val loaded=withContext(Dispatchers.IO) {
             val pending=dao.incompleteWordIds()
             val seen=dao.studiedWordIds().toSet()
@@ -654,12 +702,12 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
     }
     Column(Modifier.fillMaxSize().padding(horizontal=16.dp)) {
         ScreenHeading("单词", "按最终背诵顺序浏览，例句不足的词会标出")
-        OutlinedTextField(search,{search=it},modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
+        OutlinedTextField(search,{search=it},enabled=!batchSaving,modifier=Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("查单词或中文释义")},leadingIcon={Icon(Icons.Outlined.Search,null)},shape=RoundedCornerShape(16.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Green, unfocusedBorderColor=Color(0xFFDDE5DE)))
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top=5.dp,bottom=5.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected=mode==WordListMode.NEW,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=mode==WordListMode.REVIEW,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size+dueNoteTotal}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
-            FilterChip(selected=mode==WordListMode.ALL,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
-            FilterChip(selected=mode==WordListMode.FAVORITES,onClick={onMode(WordListMode.FAVORITES)},label={Text("收藏 ${favoriteIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow))
+            FilterChip(selected=mode==WordListMode.NEW,enabled=!batchSaving,onClick={onMode(WordListMode.NEW)},label={Text("新词 ${newIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.REVIEW,enabled=!batchSaving,onClick={onMode(WordListMode.REVIEW)},label={Text("复习 ${dueIds.size+dueNoteTotal}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleBlue))
+            FilterChip(selected=mode==WordListMode.ALL,enabled=!batchSaving,onClick={onMode(WordListMode.ALL)},label={Text("全部 2500 词")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleGreen))
+            FilterChip(selected=mode==WordListMode.FAVORITES,enabled=!batchSaving,onClick={onMode(WordListMode.FAVORITES)},label={Text("收藏 ${favoriteIds.size}")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=PaleYellow))
         }
         if(mode==WordListMode.FAVORITES) {
             Box {
@@ -686,6 +734,25 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
             is ReviewQueueEntry.Word -> wordsById[entry.wordId]?.let { it.lemma.contains(search,true) || it.meanings.contains(search,true) } == true
             is ReviewQueueEntry.Note -> entry.note.sourceText.contains(search,true) || entry.note.content.contains(search,true)
         } }
+        if(mode==WordListMode.NEW || mode==WordListMode.REVIEW) {
+            val selectableIds=if(mode==WordListMode.REVIEW)
+                visibleReviewEntries.filterIsInstance<ReviewQueueEntry.Word>().map { it.wordId }
+                else visibleWords.map { it.wordId }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
+                Text(if(selecting) "已选 ${selectedIds.size} 个单词" else "${selectableIds.size} 个单词",color=Muted,fontSize=13.sp)
+                Row {
+                    if(selecting) TextButton(enabled=!batchSaving,onClick={
+                        selectedIds=if(selectableIds.all { it in selectedIds }) emptySet() else selectableIds.toSet()
+                    }) { Text(if(selectableIds.isNotEmpty() && selectableIds.all { it in selectedIds }) "取消全选" else "全选") }
+                    TextButton(enabled=!batchSaving,onClick={selecting=!selecting;selectedIds=emptySet()}) { Text(if(selecting) "取消" else "多选") }
+                }
+            }
+            if(selecting) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                Button(enabled=selectedIds.isNotEmpty() && !batchSaving,onClick={completeSelected(false)},modifier=Modifier.weight(1f)) { Text("标记学完") }
+                OutlinedButton(enabled=selectedIds.isNotEmpty() && !batchSaving,onClick={completeSelected(true)},modifier=Modifier.weight(1f)) { Text("彻底熟悉") }
+            }
+            batchError?.let { Text(it,color=MaterialTheme.colorScheme.error,fontSize=13.sp) }
+        }
         LazyColumn(contentPadding=PaddingValues(bottom=20.dp),verticalArrangement=Arrangement.spacedBy(9.dp)) {
             if(mode==WordListMode.REVIEW) {
                 if(visibleReviewEntries.isEmpty()) item { Text(if(search.isBlank()) "当前没有待复习项目。" else "没有找到匹配的复习项目。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp)) }
@@ -693,15 +760,16 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
                     val entry=visibleReviewEntries[index]
                     when(entry) {
                         is ReviewQueueEntry.Word -> wordsById[entry.wordId]?.let { word ->
-                            Card(Modifier.fillMaxWidth().clickable { onReviewEntry(entry) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                            Card(Modifier.fillMaxWidth().clickable(enabled=!batchSaving) { if(selecting) toggleWord(word.wordId) else onReviewEntry(entry) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                                 Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
+                                    if(selecting) Checkbox(checked=word.wordId in selectedIds,onCheckedChange={toggleWord(word.wordId)},enabled=!batchSaving)
                                     Text((index+1).toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
                                     Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
                                     Text("单词",fontSize=11.sp,color=Green)
                                 }
                             }
                         }
-                        is ReviewQueueEntry.Note -> Card(Modifier.fillMaxWidth().clickable { onReviewEntry(entry) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                        is ReviewQueueEntry.Note -> Card(Modifier.fillMaxWidth().clickable(enabled=!selecting && !batchSaving) { onReviewEntry(entry) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                             Column(Modifier.padding(15.dp)) {
                                 Text("笔记复习",fontSize=11.sp,color=Green,fontWeight=FontWeight.SemiBold)
                                 if(entry.note.sourceText.isNotBlank()) Text(entry.note.sourceText,fontSize=15.sp,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,overflow=TextOverflow.Ellipsis)
@@ -721,8 +789,9 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
                 Text(if(search.isBlank() || mode==WordListMode.NEW || mode==WordListMode.REVIEW || mode==WordListMode.FAVORITES) message else "没有找到匹配的单词。",color=Muted,fontSize=14.sp,modifier=Modifier.padding(18.dp))
             }
             items(visibleWords,key={it.wordId}) { word ->
-                Card(Modifier.fillMaxWidth().clickable { onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
+                Card(Modifier.fillMaxWidth().clickable(enabled=!batchSaving) { if(selecting) toggleWord(word.wordId) else onWord(word.wordId, if(mode==WordListMode.ALL) listOf(word.wordId) else visibleWords.map { it.wordId }) },colors=CardDefaults.cardColors(containerColor=CardBg),shape=RoundedCornerShape(16.dp)) {
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
+                        if(selecting) Checkbox(checked=word.wordId in selectedIds,onCheckedChange={toggleWord(word.wordId)},enabled=!batchSaving)
                         Text(word.rank.toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
                         Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
                         Column(horizontalAlignment=Alignment.End) { Text(word.level,fontSize=10.sp,color=Green);Text("${word.exampleCount}/3 例句",fontSize=10.sp,color=if(word.exampleCount>=3)Muted else Color(0xFFB17A35)) }

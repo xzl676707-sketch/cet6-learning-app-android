@@ -313,6 +313,8 @@ data class UserWordStatus(
     @androidx.room.ColumnInfo(name="is_learning_complete", defaultValue = "1") val isLearningComplete: Boolean = true
 )
 
+data class WordBatchCompletion(val newlyLearned: Int, val reviewed: Int)
+
 @Entity(tableName = "user_word_folders", indices = [Index(value = ["name"], unique = true)])
 data class UserWordFolder(
     @PrimaryKey(autoGenerate = true) @androidx.room.ColumnInfo(name = "folder_id") val folderId: Long = 0,
@@ -438,6 +440,37 @@ interface UserDao {
         }
     }
     @Insert suspend fun insertReviewHistory(item: UserReviewHistory)
+    /** Apply the same familiar rating as a detail card, atomically for the selected words. */
+    @Transaction suspend fun completeWords(wordIds: List<Int>, mastered: Boolean, isLearningSession: Boolean): WordBatchCompletion {
+        var newlyLearned = 0
+        var reviewed = 0
+        val queuedWords = reviewQueueItems().filter { it.entryType == "word" }.map { it.itemId.toInt() }.toSet()
+        val now = System.currentTimeMillis()
+        for (wordId in wordIds.distinct()) {
+            val old = status(wordId)
+            if (old?.isMastered == true) continue
+            if (isLearningSession && old?.isLearningComplete == true) continue
+            if (!isLearningSession && wordId !in queuedWords) continue
+            if (old?.isLearningComplete != true) newlyLearned++
+            if (!isLearningSession) reviewed++
+            if (mastered) {
+                markWordMastered(wordId, Long.MAX_VALUE)
+            } else {
+                val stageBefore = old?.reviewStage ?: -1
+                val unfinished = isLearningSession && old?.isLearningComplete != true
+                val schedule = if (unfinished) scheduleNextReview("不会", -1, now)
+                    else scheduleNextReview("熟悉", stageBefore, now)
+                recordReview(
+                    UserWordStatus(wordId, "熟悉", schedule.nextReviewMillis, now,
+                        (old?.reviewCount ?: 0) + 1, schedule.stage, isLearningComplete = true),
+                    UserReviewHistory(wordId = wordId, reviewedAt = now, familiarity = "熟悉",
+                        stageBefore = stageBefore, stageAfter = schedule.stage, intervalDays = schedule.intervalDays)
+                )
+            }
+            removeReviewQueueItem("word", wordId.toLong())
+        }
+        return WordBatchCompletion(newlyLearned, reviewed)
+    }
     @Transaction suspend fun recordReview(status: UserWordStatus, history: UserReviewHistory) {
         saveStatus(status)
         insertReviewHistory(history)
