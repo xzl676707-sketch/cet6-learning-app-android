@@ -764,7 +764,12 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
                                 Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
                                     if(selecting) Checkbox(checked=word.wordId in selectedIds,onCheckedChange={toggleWord(word.wordId)},enabled=!batchSaving)
                                     Text((index+1).toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
-                                    Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
+                                    Column(Modifier.weight(1f)) {
+                                        Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink)
+                                        if (!selecting || word.wordId in selectedIds) {
+                                            Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                                        }
+                                    }
                                     Text("单词",fontSize=11.sp,color=Green)
                                 }
                             }
@@ -793,7 +798,12 @@ private fun WordListScreen(repo:ContentDb,dao:UserDao,mode:WordListMode,newGoal:
                     Row(Modifier.padding(15.dp),verticalAlignment=Alignment.CenterVertically) {
                         if(selecting) Checkbox(checked=word.wordId in selectedIds,onCheckedChange={toggleWord(word.wordId)},enabled=!batchSaving)
                         Text(word.rank.toString().padStart(2,'0'),color=Green,fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.width(38.dp))
-                        Column(Modifier.weight(1f)) { Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink);Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
+                        Column(Modifier.weight(1f)) {
+                            Text(word.lemma,fontSize=18.sp,fontWeight=FontWeight.SemiBold,color=Ink)
+                            if (!selecting || word.wordId in selectedIds) {
+                                Text(word.meanings.replace(",","；"),fontSize=12.sp,color=Muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                            }
+                        }
                         Column(horizontalAlignment=Alignment.End) { Text(word.level,fontSize=10.sp,color=Green);Text("${word.exampleCount}/3 例句",fontSize=10.sp,color=if(word.exampleCount>=3)Muted else Color(0xFFB17A35)) }
                     }
                 }
